@@ -22,12 +22,21 @@ typedef struct { bool active,pulse,settled; float goal; uint32_t start,pulseAt,n
 typedef struct __attribute__((packed)) {
   uint32_t magic; uint32_t format; uint32_t generation;
   float zero[5];
-  uint16_t wheelLimitDbar[4]; uint16_t tankLimitDbar;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
   uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec;
   uint16_t manualTimeoutMs; uint16_t calibrationReferenceDbar[5];
   uint8_t calibratedMask; uint32_t check;
 } ControllerConfig;
+typedef struct __attribute__((packed)) {
+  uint32_t magic; uint32_t format; uint32_t generation;
+  float zero[5];
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
+  uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
+  uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec;
+  uint16_t manualTimeoutMs; uint16_t calibrationReferenceDbar[5];
+  uint8_t calibratedMask; uint32_t check;
+} ControllerConfigV2;
 typedef struct __attribute__((packed)) { uint32_t magic; uint32_t revision; float zero[5]; uint32_t check; } LegacyCalibrationStore;
 typedef struct __attribute__((packed)) {
   uint8_t marker,version; uint32_t generation;
@@ -51,8 +60,9 @@ static uint8_t peerMac[6],pendingPeerMac[6]; static uint32_t pendingEncryptionAt
 static QueueHandle_t commandQueue;
 static const float sensorFullScalePsi[5]={150.0f,150.0f,150.0f,150.0f,300.0f};
 #define CFG_MAGIC 0x41524944UL
-#define CFG_FORMAT 2UL
-#define CFG_KEY "cfg_v2"
+#define CFG_FORMAT 3UL
+#define CFG_KEY "cfg_v3"
+#define CFG_KEY_V2 "cfg_v2"
 #define LEGACY_CAL_MAGIC 0x41524944UL
 #define LEGACY_CAL_REVISION 1UL
 #define ABS_WHEEL_LIMIT_DBAR 100
@@ -71,10 +81,12 @@ static bool elapsed(uint32_t n,uint32_t a,uint32_t t){return (uint32_t)(n-a)>=t;
 static uint32_t checkBytes(const uint8_t *b,size_t len){uint32_t v=0x6D2B79F5UL;for(size_t i=0;i<len;i++){v=(v<<5)|(v>>27);v^=b[i];}return v;}
 static uint32_t configCheck(const ControllerConfig *s){return checkBytes((const uint8_t*)s,offsetof(ControllerConfig,check));}
 static uint32_t legacyCheck(const LegacyCalibrationStore *s){return checkBytes((const uint8_t*)s,offsetof(LegacyCalibrationStore,check));}
+static uint32_t configV2Check(const ControllerConfigV2 *s){return checkBytes((const uint8_t*)s,offsetof(ControllerConfigV2,check));}
 static bool validConfig(const ControllerConfig *c){
   if(c->magic!=CFG_MAGIC||c->format!=CFG_FORMAT||c->check!=configCheck(c))return false;
   for(uint8_t i=0;i<5;i++)if(!isfinite(c->zero[i])||c->zero[i]<.2f||c->zero[i]>.8f)return false;
   for(uint8_t i=0;i<4;i++)if(c->wheelLimitDbar[i]<1||c->wheelLimitDbar[i]>ABS_WHEEL_LIMIT_DBAR)return false;
+  for(uint8_t p=0;p<3;p++)for(uint8_t w=0;w<4;w++)if(c->presetDbar[p][w]>c->wheelLimitDbar[w])return false;
   if(c->tankLimitDbar<1||c->tankLimitDbar>ABS_TANK_LIMIT_DBAR)return false;
   if(c->compressorOnDbar>=c->tankLimitDbar||c->targetToleranceDbar<1||c->targetToleranceDbar>20)return false;
   if(c->autoTimeoutSec<1||c->autoTimeoutSec>30||c->compressorMaxRunSec<1||c->compressorMaxRunSec>180)return false;
@@ -86,6 +98,7 @@ static void defaultConfig(ControllerConfig *c){
   memset(c,0,sizeof(*c));c->magic=CFG_MAGIC;c->format=CFG_FORMAT;
   for(uint8_t i=0;i<5;i++)c->zero[i]=.5f;
   for(uint8_t i=0;i<4;i++)c->wheelLimitDbar[i]=100;
+  for(uint8_t w=0;w<4;w++){c->presetDbar[0][w]=20;c->presetDbar[1][w]=55;c->presetDbar[2][w]=80;}
   c->tankLimitDbar=150;c->compressorOnDbar=120;c->targetToleranceDbar=2;
   c->autoTimeoutSec=30;c->compressorMaxRunSec=180;c->manualTimeoutMs=2000;
 }
@@ -112,6 +125,18 @@ static void loadConfig(void){
   if(nvs_open("airride",NVS_READWRITE,&h)!=ESP_OK)return;
   ControllerConfig saved={0};size_t bytes=sizeof(saved);
   if(nvs_get_blob(h,CFG_KEY,&saved,&bytes)==ESP_OK&&bytes==sizeof(saved)&&validConfig(&saved)){config=saved;syncCalibrationStateFromConfig();nvs_close(h);return;}
+  ControllerConfigV2 previous={0};bytes=sizeof(previous);
+  if(nvs_get_blob(h,CFG_KEY_V2,&previous,&bytes)==ESP_OK&&bytes==sizeof(previous)&&previous.magic==CFG_MAGIC&&previous.format==2UL&&previous.check==configV2Check(&previous)){
+    ControllerConfig migrated=config;
+    memcpy(migrated.zero,previous.zero,sizeof(migrated.zero));
+    memcpy(migrated.wheelLimitDbar,previous.wheelLimitDbar,sizeof(migrated.wheelLimitDbar));
+    migrated.tankLimitDbar=previous.tankLimitDbar;migrated.compressorOnDbar=previous.compressorOnDbar;
+    migrated.targetToleranceDbar=previous.targetToleranceDbar;migrated.autoTimeoutSec=previous.autoTimeoutSec;
+    migrated.compressorMaxRunSec=previous.compressorMaxRunSec;migrated.manualTimeoutMs=previous.manualTimeoutMs;
+    memcpy(migrated.calibrationReferenceDbar,previous.calibrationReferenceDbar,sizeof(migrated.calibrationReferenceDbar));
+    migrated.calibratedMask=previous.calibratedMask;
+    if(validConfig(&migrated)){config=migrated;nvs_close(h);syncCalibrationStateFromConfig();ControllerConfig upgraded=config;persistConfig(upgraded);return;}
+  }
   LegacyCalibrationStore old={0};bytes=sizeof(old);
   if(nvs_get_blob(h,"cal_v1",&old,&bytes)==ESP_OK&&bytes==sizeof(old)&&old.magic==LEGACY_CAL_MAGIC&&old.revision==LEGACY_CAL_REVISION&&old.check==legacyCheck(&old)){
     bool good=true;for(uint8_t i=0;i<5;i++)good=good&&isfinite(old.zero[i])&&old.zero[i]>=.2f&&old.zero[i]<=.8f;
@@ -140,7 +165,7 @@ static void sendSettings(void){
     return;
   }
   SettingsFrame f={0};f.marker=0xA2;f.version=1;f.generation=config.generation;
-  memcpy(f.wheelLimitDbar,config.wheelLimitDbar,sizeof(f.wheelLimitDbar));f.tankLimitDbar=config.tankLimitDbar;
+  memcpy(f.wheelLimitDbar,config.wheelLimitDbar,sizeof(f.wheelLimitDbar));memcpy(f.presetDbar,config.presetDbar,sizeof(f.presetDbar));f.tankLimitDbar=config.tankLimitDbar;
   f.compressorOnDbar=config.compressorOnDbar;f.targetToleranceDbar=config.targetToleranceDbar;
   f.autoTimeoutSec=config.autoTimeoutSec;f.compressorMaxRunSec=config.compressorMaxRunSec;f.manualTimeoutMs=config.manualTimeoutMs;
   f.calibratedMask=config.calibratedMask;memcpy(f.calibrationReferenceDbar,config.calibrationReferenceDbar,sizeof(f.calibrationReferenceDbar));
@@ -189,16 +214,18 @@ static bool calibrate(uint8_t s,uint16_t bar10){
 }
 static void manualStart(uint8_t w,bool up,float p[5]){if(w>3||!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w))))return;cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
 static void targetStart(uint8_t w,uint16_t b){if(w>3||b>config.wheelLimitDbar[w])return;cancel(w);jobs[w].active=true;jobs[w].goal=((float)b/10.0f)/.0689476f;jobs[w].start=jobs[w].next=now();}
+static void presetStart(uint8_t preset){if(preset>2)return;for(uint8_t w=0;w<4;w++)targetStart(w,config.presetDbar[preset][w]);}
 static uint16_t readLe16(const uint8_t *p){return (uint16_t)p[0]|((uint16_t)p[1]<<8);}
 static uint32_t readLe32(const uint8_t *p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
 static bool changeSettings(const uint8_t *c,uint8_t len){
-  /* B1 43 + 20 bytes of settings + 32-bit checksum over the 22-byte header/payload. */
-  if(len!=26||readLe32(&c[22])!=checkBytes(c,22))return false;
+  /* B1 43 + controller settings + preset table + 32-bit checksum. */
+  if(len!=50||readLe32(&c[46])!=checkBytes(c,46))return false;
   ControllerConfig next=config;size_t at=2;
   for(uint8_t i=0;i<4;i++,at+=2)next.wheelLimitDbar[i]=readLe16(&c[at]);
   next.tankLimitDbar=readLe16(&c[at]);at+=2;next.compressorOnDbar=readLe16(&c[at]);at+=2;
   next.targetToleranceDbar=readLe16(&c[at]);at+=2;next.autoTimeoutSec=readLe16(&c[at]);at+=2;
-  next.compressorMaxRunSec=readLe16(&c[at]);at+=2;next.manualTimeoutMs=readLe16(&c[at]);
+  next.compressorMaxRunSec=readLe16(&c[at]);at+=2;next.manualTimeoutMs=readLe16(&c[at]);at+=2;
+  for(uint8_t p=0;p<3;p++)for(uint8_t w=0;w<4;w++,at+=2)next.presetDbar[p][w]=readLe16(&c[at]);
   return persistConfig(next);
 }
 static void runJob(uint8_t w,float p[5]){
@@ -219,6 +246,8 @@ static void process(const uint8_t *c,uint8_t len,float p[5]){
   if(len==2&&c[1]==0x42){sendSettings();return;}
   if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok);sendSettings();return;}
   if(len==5&&c[1]==0x40){uint16_t v=readLe16(&c[3]);targetStart(c[2],v);return;}
+  if(len==3&&c[1]==0x44){presetStart(c[2]);return;}
+  if(len==4&&c[1]==0x45){uint8_t preset=c[2],wheel=c[3];if(preset<3&&wheel<4)targetStart(wheel,config.presetDbar[preset][wheel]);return;}
   if(len==5&&c[1]==0x41){bool ok=calibrate(c[2],readLe16(&c[3]));sendAck(0x41,ok);sendSettings();if(ok)sendCalibrationState();return;}
   if(len==2&&c[1]==0x2F){stopAll();return;}
   if(len==2&&c[1]>=0x20&&c[1]<=0x27){manualStart((c[1]-0x20)/2,!(c[1]&1),p);return;}
