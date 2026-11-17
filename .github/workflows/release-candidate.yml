@@ -25,6 +25,7 @@ jobs:
       - name: Build and export sparse Intel HEX
         working-directory: controller
         run: |
+          . /opt/esp/idf/export.sh
           idf.py build
           idf.py merge-bin -f hex -o build/air-suspension-controller.hex
       - uses: actions/upload-artifact@v4
