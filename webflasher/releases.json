@@ -1,0 +1,14 @@
+{
+  "releases": [
+    {
+      "tag": "v0.1.0-rc.1",
+      "label": "0.1.0-rc.1",
+      "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1",
+      "assets": {
+        "controller": "air-suspension-controller.hex",
+        "t-display": "air-suspension-remote-t-display.hex",
+        "remote-2inch": "air-suspension-remote-2inch.hex"
+      }
+    }
+  ]
+}
