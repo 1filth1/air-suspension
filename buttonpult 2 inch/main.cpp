@@ -265,7 +265,7 @@ bool addControllerPeer(const uint8_t *mac) {
   memcpy(controllerMac, mac, 6); controllerPeerKnown = true; return true;
 }
 void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
-  if (!info || !data) return;
+  if (!mac_addr || !data) return;
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = CONNECTING;
     if (addControllerPeer(mac_addr)) { const uint8_t confirm[2] = {0xE1,0x02}; esp_now_send(controllerMac, confirm, sizeof(confirm)); }
