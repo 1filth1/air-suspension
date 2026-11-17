@@ -8,6 +8,7 @@
 #include <Adafruit_ST7789.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <stddef.h>
 #include <soc/gpio_reg.h>
 #include <soc/soc.h>
 #include <esp_sleep.h>
@@ -59,6 +60,20 @@
 struct PressurePacket { uint8_t marker; float bar[5]; uint8_t flags; } __attribute__((packed));
 
 struct EspNowDiscoveryPacket { uint8_t marker; uint8_t type; } __attribute__((packed));
+struct SettingsFrame {
+  uint8_t marker,version; uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar; uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
+  uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 75, "Settings frame layout changed");
+uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) { value = (value << 5) | (value >> 27); value ^= bytes[i]; }
+  return value;
+}
 
 enum Key : uint8_t { UP = 1, DOWN = 2, BACK = 3, NEXT = 4, KEYOK = 5,
                      PARK_KEY = 6, DRIVE_KEY = 7, LIFT_KEY = 8,
@@ -346,6 +361,8 @@ void handleManualValves();
 void compressorMenu();
 void drawCompressorValue(uint8_t row, bool selected);
 void saveCompressorThreshold(uint8_t which);
+void sendSettingsUpdate();
+void applyControllerSettings();
 void transitionTo(uint8_t newPage, uint8_t newCursor = 0);
 
 Preferences prefs;
@@ -355,6 +372,10 @@ uint32_t lastControllerPacketMs = 0;
 uint32_t lastDiscoveryMs = 0;
 PressurePacket receivedPressure = {};
 volatile bool telemetryPending = false;
+SettingsFrame receivedSettings = {};
+volatile bool settingsFramePending = false;
+SettingsFrame controllerSettings = {};
+bool controllerSettingsLoaded = false;
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
 const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
 float pressure[5] = {NAN,NAN,NAN,NAN,NAN};
@@ -546,7 +567,7 @@ void updatePresetLightAnimation() {
 }
 
 void stopAll() { const uint8_t p[]={0xB1,0x2F}; sendCommand(p,sizeof(p)); }
-void tune(uint8_t w) { if(w>3)return; uint16_t v=target[active][w]; const uint8_t p[]={0xB1,0x40,w,(uint8_t)v,(uint8_t)(v>>8)}; sendCommand(p,sizeof(p)); }
+void tune(uint8_t w) { if(w>3)return; const uint8_t p[]={0xB1,0x45,active,w}; sendCommand(p,sizeof(p)); }
 void choosePreset(uint8_t p) {
   manualMode = false;
   active = p;
@@ -1007,7 +1028,7 @@ void editor() {
   top("EDIT PRESET");
   drawEditorHeader();
   for (uint8_t i = 0; i < 4; ++i) drawEditorWheel(i, i == editWheel);
-  foot("UP/DN value  OK next wheel  BACK menu");
+  foot(controllerSettingsLoaded ? "UP/DN value  OK next wheel  BACK menu" : "WAIT FOR CONTROLLER SETTINGS");
 }
 
 void drawCalibrationSensor(uint8_t index, bool selected) {
@@ -1048,12 +1069,41 @@ void compressorMenu() {
   foot("UP/DN value  OK row  BACK menu");
 }
 
-void saveCompressorThreshold(uint8_t which) {
-  // B1 42 selector value-low value-high. selector 0 is the turn-on pressure;
-  // selector 1 is the turn-off pressure. The controller saves it in NVS.
-  const uint16_t value10 = which == 0 ? compressorOnBar10 : compressorOffBar10;
-  const uint8_t p[] = {0xB1, 0x42, which, (uint8_t)value10, (uint8_t)(value10 >> 8)};
-  sendCommand(p, sizeof(p));
+void saveCompressorThreshold(uint8_t) { sendSettingsUpdate(); }
+
+void sendSettingsUpdate() {
+  if (!controllerSettingsLoaded || !linked) return;
+  uint8_t packet[50] = {0xB1, 0x43};
+  size_t at = 2;
+  for (uint8_t i = 0; i < 4; ++i, at += 2) { packet[at] = controllerSettings.wheelLimitDbar[i] & 0xFF; packet[at + 1] = controllerSettings.wheelLimitDbar[i] >> 8; }
+  const uint16_t fixed[] = {controllerSettings.tankLimitDbar, controllerSettings.compressorOnDbar,
+    controllerSettings.targetToleranceDbar, controllerSettings.autoTimeoutSec,
+    controllerSettings.compressorMaxRunSec, controllerSettings.manualTimeoutMs};
+  for (uint8_t i = 0; i < 6; ++i, at += 2) { packet[at] = fixed[i] & 0xFF; packet[at + 1] = fixed[i] >> 8; }
+  for (uint8_t p = 0; p < 3; ++p) for (uint8_t w = 0; w < 4; ++w, at += 2) {
+    packet[at] = target[p][w] & 0xFF; packet[at + 1] = target[p][w] >> 8;
+  }
+  const uint32_t checksum = checkBytes(packet, 46);
+  memcpy(&packet[46], &checksum, sizeof(checksum));
+  sendCommand(packet, sizeof(packet));
+}
+
+void applyControllerSettings() {
+  if (!settingsFramePending) return;
+  SettingsFrame snapshot;
+  noInterrupts();
+  memcpy(&snapshot, &receivedSettings, sizeof(snapshot));
+  settingsFramePending = false;
+  interrupts();
+  if (snapshot.marker != 0xA2 || snapshot.version != 1 ||
+      snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
+  controllerSettings = snapshot;
+  memcpy(target, snapshot.presetDbar, sizeof(target));
+  compressorOnBar10 = snapshot.compressorOnDbar;
+  compressorOffBar10 = snapshot.tankLimitDbar;
+  controllerSettingsLoaded = true;
+  if (page == 4) editor();
+  else if (page == 10) compressorMenu();
 }
 
 void transitionTo(uint8_t newPage, uint8_t newCursor) {
@@ -1248,10 +1298,15 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
     return;
   }
 
-  if (len != (int)sizeof(PressurePacket) || data[0] != 0xA1) return;
-  // The callback only copies a complete telemetry frame. Drawing and valve
-  // decisions remain in loop(), outside Wi-Fi's callback task.
   if (!controllerPeerKnown || memcmp(controllerMac, info->src_addr, 6) != 0) return;
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    memcpy(&receivedSettings, data, sizeof(receivedSettings));
+    settingsFramePending = true;
+    lastControllerPacketMs = millis();
+    return;
+  }
+  if (len != (int)sizeof(PressurePacket) || data[0] != 0xA1) return;
+  // The callback only copies complete frames. Drawing remains in loop().
   memcpy(&receivedPressure, data, sizeof(receivedPressure));
   lastControllerPacketMs = millis();
   telemetryPending = true;
@@ -1323,6 +1378,7 @@ void serviceEspNow() {
     const EspNowDiscoveryPacket heartbeat = {0xE1, 0x02};
     esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&heartbeat), sizeof(heartbeat));
   }
+  applyControllerSettings();
   if (telemetryPending) {
     noInterrupts();
     PressurePacket packet = receivedPressure;
@@ -1414,11 +1470,7 @@ Key key(){
   return NONE;
 }
 
-void saveTarget(){
-  char k[8];
-  snprintf(k,sizeof(k),"p%uw%u",editPreset,editWheel);
-  prefs.putUShort(k,target[editPreset][editWheel]);
-}
+void saveTarget(){ sendSettingsUpdate(); }
 
 void handleModeButton(){
   const bool down = digitalRead(BTN_MODE) == LOW;
@@ -1687,7 +1739,8 @@ void action(Key k){
     if(k==KEYOK){choosePreset(cursor); transitionTo(0);}
     else if(k==BACK){transitionTo(2, 0);}
   } else if(page==4){
-    if (k == UP && target[editPreset][editWheel] < 150) {
+    if (!controllerSettingsLoaded) return;
+    if (k == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) {
       target[editPreset][editWheel] += 1;
       saveTarget();
       drawEditorWheel(editWheel, true);
@@ -1739,15 +1792,17 @@ void action(Key k){
     if(k==BACK){transitionTo(2, 2);}
   } else if(page==10) {
     if (k == UP) {
+      if (!controllerSettingsLoaded) return;
       uint16_t &selected = compressorRow == 0 ? compressorOnBar10 : compressorOffBar10;
       const uint16_t maximum = compressorRow == 0 ? compressorOffBar10 - 1 : 150;
-      if (selected < maximum) { selected++; prefs.putUShort(compressorRow == 0 ? "compOn" : "compOff", selected); saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
+      if (selected < maximum) { selected++; if (compressorRow == 0) controllerSettings.compressorOnDbar = selected; else controllerSettings.tankLimitDbar = selected; saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
       return;
     }
     if (k == DOWN) {
+      if (!controllerSettingsLoaded) return;
       uint16_t &selected = compressorRow == 0 ? compressorOnBar10 : compressorOffBar10;
       const uint16_t minimum = compressorRow == 0 ? 0 : compressorOnBar10 + 1;
-      if (selected > minimum) { selected--; prefs.putUShort(compressorRow == 0 ? "compOn" : "compOff", selected); saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
+      if (selected > minimum) { selected--; if (compressorRow == 0) controllerSettings.compressorOnDbar = selected; else controllerSettings.tankLimitDbar = selected; saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
       return;
     }
     if (k == KEYOK) {
@@ -1861,20 +1916,13 @@ void setup(){
   if(ledBrightness<10||ledBrightness>100)ledBrightness=100;
   buzzerVolume=prefs.getUChar("volume",70);
   if(buzzerVolume<10||buzzerVolume>100)buzzerVolume=70;
-  compressorOnBar10=prefs.getUShort("compOn",110);
-  compressorOffBar10=prefs.getUShort("compOff",145);
-  // A bad or erased flash value must never make the compressor thresholds
-  // overlap; restore the safe 11.0 / 14.5 bar defaults in that case.
-  if (compressorOnBar10 >= compressorOffBar10 || compressorOffBar10 > 150) {
-    compressorOnBar10=110;
-    compressorOffBar10=145;
-  }
+  // Vehicle settings are loaded from the controller after the encrypted
+  // ESP-NOW link is established. These values only keep the menu drawable
+  // while the controller is still connecting.
+  compressorOnBar10=120;
+  compressorOffBar10=150;
   analogWrite(LCD_BL,(uint16_t)brightness*255/100);
-  for(uint8_t a=0;a<3;a++)for(uint8_t b=0;b<4;b++){
-    char k[8];
-    snprintf(k,sizeof(k),"p%uw%u",a,b);
-    target[a][b]=prefs.getUShort(k,target[a][b]);
-  }
+  // Preset pressures are owned and saved by the controller.
   setupEspNow();
   usbPowerPresent = usbPowerConnected();
   lastPowerSourceCheckMs = millis();
