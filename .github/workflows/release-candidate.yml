@@ -23,9 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and export sparse Intel HEX
+        working-directory: controller
         run: |
-          idf.py -C controller build
-          idf.py -C controller merge-bin -f hex -o build/air-suspension-controller.hex
+          idf.py build
+          idf.py merge-bin -f hex -o build/air-suspension-controller.hex
       - uses: actions/upload-artifact@v4
         with:
           name: controller-hex
@@ -46,18 +47,18 @@ jobs:
         working-directory: button pult t-display
         run: |
           pio run -e t-display
-          mkdir -p ../../dist
+          mkdir -p ../dist
           BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
           test -n "$BOOT_APP0"
-          python -m esptool --chip esp32s3 merge_bin --format hex -o ../../dist/air-suspension-remote-t-display.hex --flash_mode dio --flash_freq 40m --flash_size 8MB 0x0 .pio/build/t-display/bootloader.bin 0x8000 .pio/build/t-display/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/t-display/firmware.bin
+          python -m esptool --chip esp32s3 merge_bin --format hex -o ../dist/air-suspension-remote-t-display.hex --flash_mode dio --flash_freq 40m --flash_size 8MB 0x0 .pio/build/t-display/bootloader.bin 0x8000 .pio/build/t-display/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/t-display/firmware.bin
       - name: Build 2-inch remote and preserve NVS sectors
         working-directory: buttonpult 2 inch
         run: |
           pio run -e remote-2inch
-          mkdir -p ../../dist
+          mkdir -p ../dist
           BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
           test -n "$BOOT_APP0"
-          python -m esptool --chip esp32 merge_bin --format hex -o ../../dist/air-suspension-remote-2inch.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/remote-2inch/bootloader.bin 0x8000 .pio/build/remote-2inch/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/remote-2inch/firmware.bin
+          python -m esptool --chip esp32 merge_bin --format hex -o ../dist/air-suspension-remote-2inch.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/remote-2inch/bootloader.bin 0x8000 .pio/build/remote-2inch/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/remote-2inch/firmware.bin
       - uses: actions/upload-artifact@v4
         with:
           name: remote-hex
