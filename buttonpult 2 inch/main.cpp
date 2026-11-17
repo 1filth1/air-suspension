@@ -300,7 +300,7 @@ void serviceEspNow() {
   const bool fresh = controllerPeerKnown && now - lastControllerPacketMs < CONTROLLER_TIMEOUT_MS;
   if (fresh != linked) {
     linked = fresh; bleState = fresh ? CONNECTED : RETRYING;
-    if (!fresh) { if (controllerPeerKnown) esp_now_del_peer(controllerMac); controllerPeerKnown = false; memset(controllerMac, 0, sizeof(controllerMac)); lastControllerPacketMs = 0; lastDiscoveryMs = now; }
+    if (!fresh) { if (controllerPeerKnown) esp_now_del_peer(controllerMac); controllerPeerKnown = false; controllerSettingsLoaded = false; memset(controllerMac, 0, sizeof(controllerMac)); lastControllerPacketMs = 0; lastDiscoveryMs = now; }
     if (page == HOME) footer();
   }
   if (!fresh && now - lastDiscoveryMs >= DISCOVERY_INTERVAL_MS) { lastDiscoveryMs = now; sendDiscovery(); if (page == HOME) footer(); }
