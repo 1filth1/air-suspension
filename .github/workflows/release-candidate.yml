@@ -1,0 +1,82 @@
+name: Firmware build and release candidate
+
+on:
+  pull_request:
+    paths:
+      - "controller/**"
+      - "button pult t-display/**"
+      - "buttonpult 2 inch/**"
+      - ".github/workflows/release-candidate.yml"
+  push:
+    tags:
+      - "v*-rc*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  controller:
+    name: Build controller firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and export sparse Intel HEX
+        run: |
+          idf.py -C controller build
+          idf.py -C controller merge-bin -f hex -o build/air-suspension-controller.hex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: controller-hex
+          path: controller/build/air-suspension-controller.hex
+          if-no-files-found: error
+
+  remotes:
+    name: Build remote firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio==6.1.16 esptool==4.8.1
+      - name: Build T-Display remote and preserve NVS sectors
+        working-directory: button pult t-display
+        run: |
+          pio run -e t-display
+          mkdir -p ../../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32s3 merge_bin --format hex -o ../../dist/air-suspension-remote-t-display.hex --flash_mode dio --flash_freq 40m --flash_size 8MB 0x0 .pio/build/t-display/bootloader.bin 0x8000 .pio/build/t-display/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/t-display/firmware.bin
+      - name: Build 2-inch remote and preserve NVS sectors
+        working-directory: buttonpult 2 inch
+        run: |
+          pio run -e remote-2inch
+          mkdir -p ../../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32 merge_bin --format hex -o ../../dist/air-suspension-remote-2inch.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/remote-2inch/bootloader.bin 0x8000 .pio/build/remote-2inch/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/remote-2inch/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-hex
+          path: dist/*.hex
+          if-no-files-found: error
+
+  prerelease:
+    name: Publish GitHub prerelease
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-rc')
+    needs: [controller, remotes]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Air Suspension ${{ github.ref_name }}
+          prerelease: true
+          generate_release_notes: true
+          files: release-assets/*.hex
