@@ -54,8 +54,7 @@
 #define BUZZER_PIN 18
 #define PRESET_LED_PIN 44
 #define MANUAL_LED_PIN 43
-// ESP-NOW uses Wi-Fi channel 1. The controller will use the same fixed
-// channel and the same 16-byte key when it is converted in the next step.
+// ESP-NOW uses Wi-Fi channel 1 and the same 16-byte key as the controller.
 
 struct PressurePacket { uint8_t marker; float bar[5]; uint8_t flags; } __attribute__((packed));
 
@@ -1354,11 +1353,10 @@ void serviceEspNow() {
       // peer record as well, so its clear E1 81 discovery reply is never
       // tied to stale encryption state. The next reply rebuilds the peer and
       // sends encrypted E1 02 exactly like the first connection.
-      if (controllerPeerKnown) {
-        esp_now_del_peer(controllerMac);
-        controllerPeerKnown = false;
-        memset(controllerMac, 0, sizeof(controllerMac));
-      }
+      if (controllerPeerKnown) esp_now_del_peer(controllerMac);
+      controllerPeerKnown = false;
+      controllerSettingsLoaded = false;
+      memset(controllerMac, 0, sizeof(controllerMac));
       lastControllerPacketMs = 0;
       // Do not wait for the normal 500 ms discovery period after a controller
       // disappears. Start a new clear broadcast handshake immediately; this
