@@ -86,7 +86,7 @@ enum BleState { BLE_SEARCHING, BLE_CONNECTING, BLE_CONNECTED, BLE_RETRYING };
 // Forward declarations
 void updateBatteryChargeAnimation();
 
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
 void onEspNowSend(const const uint8_t *, esp_now_send_status_t status);
 
 constexpr uint8_t ESPNOW_CHANNEL = 1;
@@ -486,15 +486,15 @@ uint8_t buzzerDuty() {
 }
 
 void startBeep(uint16_t frequencyHz, uint16_t durationMs) {
-  ledcWriteTone(BUZZER_PIN, frequencyHz);
-  ledcWrite(BUZZER_PIN, buzzerDuty());
+  ledcWriteTone(0, frequencyHz);
+  ledcWrite(0, buzzerDuty());
   buzzerOffMs = millis() + durationMs;
 }
 
 void updateBuzzer() {
   const uint32_t now = millis();
   if (buzzerOffMs != 0 && (int32_t)(now - buzzerOffMs) >= 0) {
-    ledcWriteTone(BUZZER_PIN, 0);
+    ledcWriteTone(0, 0);
     buzzerOffMs = 0;
   }
 }
@@ -509,12 +509,12 @@ void updateButtonLights(bool force) {
     // Start the MANUAL lamp immediately on a mode change. The regular loop
     // then continues the smooth breathing animation from this visible state.
     const uint8_t maximum = presetLedDuty();
-    ledcWrite(PRESET_LED_PIN, 0);
-    ledcWrite(MANUAL_LED_PIN, maximum / 10U);
+    ledcWrite(2, 0);
+    ledcWrite(1, maximum / 10U);
   } else {
-    ledcWrite(MANUAL_LED_PIN, 0);
+    ledcWrite(1, 0);
     // A completed preset must leave its indicator off, not steadily lit.
-    if (!presetRunActive && !presetLedConfirming) ledcWrite(PRESET_LED_PIN, 0);
+    if (!presetRunActive && !presetLedConfirming) ledcWrite(2, 0);
   }
 }
 
@@ -526,7 +526,7 @@ void updatePresetLightAnimation() {
   if (presetLedSelfTest) {
     const uint32_t elapsed = now - presetLedSelfTestStartedMs;
     if (elapsed < 1200U) {
-      ledcWrite(PRESET_LED_PIN, ((elapsed / 200U) % 2U) == 0U ? presetLedDuty() : 0);
+      ledcWrite(2, ((elapsed / 200U) % 2U) == 0U ? presetLedDuty() : 0);
     } else {
       presetLedSelfTest = false;
       updateButtonLights(true);
@@ -538,8 +538,8 @@ void updatePresetLightAnimation() {
     // same brightness setting and remain synchronised for the whole mode.
     const bool on = (now % 1600U) < 800U;
     const uint8_t duty = on ? presetLedDuty() : 0;
-    ledcWrite(PRESET_LED_PIN, duty);  // GPIO44
-    ledcWrite(MANUAL_LED_PIN, duty);  // GPIO43
+    ledcWrite(2, duty);  // GPIO44
+    ledcWrite(1, duty);  // GPIO43
     return;
   }
   if (presetRunActive) {
@@ -547,19 +547,19 @@ void updatePresetLightAnimation() {
     const uint32_t phase = now % 1200U;
     const uint32_t ramp = phase < 600U ? phase : 1200U - phase;
     const uint8_t maximum = presetLedDuty();
-    ledcWrite(PRESET_LED_PIN, maximum / 10U + ((uint16_t)maximum * 9U * ramp) / 6000U);
+    ledcWrite(2, maximum / 10U + ((uint16_t)maximum * 9U * ramp) / 6000U);
     return;
   }
   if (presetLedConfirming) {
     const uint32_t elapsed = now - presetLedConfirmStartedMs;
     if (elapsed < 720U) {
       // Three fast on/off flashes: 120 ms bright, then 120 ms dark.
-      ledcWrite(PRESET_LED_PIN, ((elapsed / 120U) % 2U) == 0U ? presetLedDuty() : 0);
+      ledcWrite(2, ((elapsed / 120U) % 2U) == 0U ? presetLedDuty() : 0);
     } else {
       presetLedConfirming = false;
       // The three confirmation flashes are the end indication. Once the
       // valves are closed and the preset is settled, turn this LED off.
-      ledcWrite(PRESET_LED_PIN, 0);
+      ledcWrite(2, 0);
     }
   }
 }
@@ -1280,8 +1280,8 @@ bool addControllerPeer(const uint8_t *mac) {
   return true;
 }
 
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  if (info == nullptr || data == nullptr) return;
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
+  if (mac_addr == nullptr || data == nullptr) return;
 
   // The controller deliberately answers discovery in the clear, then changes
   // this MAC address to the shared encrypted ESP-NOW key.  Complete that
@@ -1289,14 +1289,14 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
   // never receives E1 02 and correctly keeps every valve closed.
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = BLE_CONNECTING;
-    if (addControllerPeer(info->src_addr)) {
+    if (addControllerPeer(mac_addr)) {
       const EspNowDiscoveryPacket confirm = {0xE1, 0x02};
       esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&confirm), sizeof(confirm));
     }
     return;
   }
 
-  if (!controllerPeerKnown || memcmp(controllerMac, info->src_addr, 6) != 0) return;
+  if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
   if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
     memcpy(&receivedSettings, data, sizeof(receivedSettings));
     settingsFramePending = true;
@@ -1864,7 +1864,7 @@ void action(Key k){
     else if(k==BACK){transitionTo(6, 2);}
     prefs.putUChar("volume",buzzerVolume);
     // Apply the new level immediately if a warning beep is still sounding.
-    if (buzzerOffMs != 0) ledcWrite(BUZZER_PIN, buzzerDuty());
+    if (buzzerOffMs != 0) ledcWrite(0, buzzerDuty());
   }
   render();
 }
@@ -1888,13 +1888,16 @@ void setup(){
   delay(2000);
   digitalWrite(PRESET_LED_PIN, LOW);
   // Attach GPIO18 to a PWM tone generator for the passive piezo buzzer.
-  ledcAttach(BUZZER_PIN, 2400, 8);
-  ledcWriteTone(BUZZER_PIN, 0);
+  ledcSetup(0, 2400, 8);
+  ledcAttachPin(BUZZER_PIN, 0);
+  ledcWriteTone(0, 0);
   // PWM lets both ordinary white LEDs use the menu-selected brightness.
-  ledcAttach(MANUAL_LED_PIN, 5000, 8);
-  ledcWrite(MANUAL_LED_PIN, 0);
-  ledcAttach(PRESET_LED_PIN, 5000, 8);
-  ledcWrite(PRESET_LED_PIN, 0);
+  ledcSetup(1, 5000, 8);
+  ledcAttachPin(MANUAL_LED_PIN, 1);
+  ledcWrite(1, 0);
+  ledcSetup(2, 5000, 8);
+  ledcAttachPin(PRESET_LED_PIN, 2);
+  ledcWrite(2, 0);
   presetLedSelfTestStartedMs = millis();
   analogReadResolution(12);
   analogSetPinAttenuation(BATTERY_ADC, ADC_11db);
