@@ -87,7 +87,7 @@ enum BleState { BLE_SEARCHING, BLE_CONNECTING, BLE_CONNECTED, BLE_RETRYING };
 void updateBatteryChargeAnimation();
 
 void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
-void onEspNowSend(const const uint8_t *, esp_now_send_status_t status);
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status);
 
 constexpr uint8_t ESPNOW_CHANNEL = 1;
 const uint8_t ESPNOW_LMK[16] = {0x41,0x69,0x72,0x52,0x69,0x64,0x65,0x2D,0x32,0x30,0x32,0x36,0x2D,0x4B,0x31,0x21};
@@ -1310,7 +1310,7 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   telemetryPending = true;
 }
 
-void onEspNowSend(const const uint8_t *, esp_now_send_status_t status) {
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status) {
   if (status != ESP_NOW_SEND_SUCCESS && linked) {
     linked = false;
     bleState = BLE_RETRYING;
