@@ -47,7 +47,7 @@ void choosePreset(uint8_t p);
 void updateArrival();
 void refreshTelemetry();
 void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len);
-void onEspNowSend(const wifi_tx_info_t *, esp_now_send_status_t status);
+void onEspNowSend(const const uint8_t *, esp_now_send_status_t status);
 void setupEspNow();
 void serviceEspNow();
 void applyControllerSettings();
@@ -281,7 +281,7 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
   } else return;
   lastControllerPacketMs = millis();
 }
-void onEspNowSend(const wifi_tx_info_t *, esp_now_send_status_t status) {
+void onEspNowSend(const const uint8_t *, esp_now_send_status_t status) {
   if (status != ESP_NOW_SEND_SUCCESS && linked) { linked = false; bleState = RETRYING; }
 }
 void setupEspNow() {
