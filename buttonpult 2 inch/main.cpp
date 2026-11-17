@@ -47,7 +47,7 @@ void choosePreset(uint8_t p);
 void updateArrival();
 void refreshTelemetry();
 void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
-void onEspNowSend(const const uint8_t *, esp_now_send_status_t status);
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status);
 void setupEspNow();
 void serviceEspNow();
 void applyControllerSettings();
@@ -281,7 +281,7 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   } else return;
   lastControllerPacketMs = millis();
 }
-void onEspNowSend(const const uint8_t *, esp_now_send_status_t status) {
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status) {
   if (status != ESP_NOW_SEND_SUCCESS && linked) { linked = false; bleState = RETRYING; }
 }
 void setupEspNow() {
