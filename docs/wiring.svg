@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 980" role="img" aria-labelledby="title desc">
+<title id="title">Схема подключения контроллера пневмоподвески Air Suspension</title>
+<desc id="desc">ESP32 DevKit V1 подключен к пяти датчикам давления через аналоговые входы, к драйверам восьми клапанов и реле компрессора. Два пульта связаны с контроллером по ESP-NOW.</desc>
+<defs>
+  <style>
+    .bg{fill:#f4f7fb}.panel{fill:#fff;stroke:#ccd7e5;stroke-width:2}.controller{fill:#15233a;stroke:#0b1320;stroke-width:3}
+    .title{font:700 30px Arial,sans-serif;fill:#132238}.sub{font:16px Arial,sans-serif;fill:#53657d}
+    .h{font:700 18px Arial,sans-serif;fill:#132238}.body{font:15px Arial,sans-serif;fill:#24364d}
+    .small{font:13px Arial,sans-serif;fill:#52657c}.white{fill:#fff}.chip{font:700 17px Arial,sans-serif;fill:#fff}
+    .wireA{fill:none;stroke:#2f80ed;stroke-width:4}.wireD{fill:none;stroke:#dc4b4b;stroke-width:4}
+    .wireC{fill:none;stroke:#ef9d21;stroke-width:4}.wireG{fill:none;stroke:#63778d;stroke-width:3;stroke-dasharray:8 7}
+    .wireW{fill:none;stroke:#7856c8;stroke-width:4;stroke-dasharray:9 7}
+    .sensor{fill:#eaf4ff;stroke:#2f80ed;stroke-width:2}.driver{fill:#fff2e2;stroke:#ef9d21;stroke-width:2}
+    .act{fill:#fff0f0;stroke:#dc4b4b;stroke-width:2}.remote{fill:#f2edff;stroke:#7856c8;stroke-width:2}
+    .pin{font:700 13px Arial,sans-serif;fill:#0d4f99}
+  </style>
+  <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2f80ed"/></marker>
+  <marker id="arrowD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#dc4b4b"/></marker>
+  <marker id="arrowC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ef9d21"/></marker>
+</defs>
+<rect class="bg" width="1500" height="980"/>
+<text class="title" x="48" y="54">Air Suspension · контроллер и соединения</text>
+<text class="sub" x="50" y="82">GPIO соответствует прошивке controller/main.c · сначала проверьте распиновку своей платы и драйверов</text>
+
+<!-- sensor blocks -->
+<rect class="panel" x="45" y="125" width="345" height="520" rx="18"/>
+<text class="h" x="70" y="162">ДАТЧИКИ ДАВЛЕНИЯ</text>
+<text class="small" x="70" y="188">Сигнал каждого датчика — через входной делитель</text>
+<g>
+ <rect class="sensor" x="70" y="215" width="290" height="62" rx="12"/><text class="body" x="88" y="240">Переднее левое колесо</text><text class="pin" x="88" y="262">GPIO32 · ADC1_CH4</text>
+ <rect class="sensor" x="70" y="293" width="290" height="62" rx="12"/><text class="body" x="88" y="318">Переднее правое колесо</text><text class="pin" x="88" y="340">GPIO33 · ADC1_CH5</text>
+ <rect class="sensor" x="70" y="371" width="290" height="62" rx="12"/><text class="body" x="88" y="396">Заднее левое колесо</text><text class="pin" x="88" y="418">GPIO34 · ADC1_CH6</text>
+ <rect class="sensor" x="70" y="449" width="290" height="62" rx="12"/><text class="body" x="88" y="474">Заднее правое колесо</text><text class="pin" x="88" y="496">GPIO35 · ADC1_CH7</text>
+ <rect class="sensor" x="70" y="527" width="290" height="62" rx="12"/><text class="body" x="88" y="552">Ресивер</text><text class="pin" x="88" y="574">GPIO36 · ADC1_CH0</text>
+</g>
+<text class="small" x="70" y="617">GND датчиков соединить с GND контроллера.</text>
+
+<!-- analog wires -->
+<path class="wireA" marker-end="url(#arrowA)" d="M360 246H490"/>
+<path class="wireA" marker-end="url(#arrowA)" d="M360 324H490"/>
+<path class="wireA" marker-end="url(#arrowA)" d="M360 402H490"/>
+<path class="wireA" marker-end="url(#arrowA)" d="M360 480H490"/>
+<path class="wireA" marker-end="url(#arrowA)" d="M360 558H490"/>
+
+<!-- controller -->
+<rect class="controller" x="490" y="150" width="350" height="465" rx="24"/>
+<text class="chip" x="535" y="194">ESP32 DevKit V1</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="224">КОНТРОЛЛЕР · NVS хранит настройки</text>
+<line x1="520" y1="245" x2="810" y2="245" stroke="#3c4d65" stroke-width="2"/>
+<text class="white" style="font:700 15px Arial,sans-serif" x="535" y="278">АНАЛОГОВЫЕ ВХОДЫ</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="304">GPIO32 / 33 / 34 / 35 / 36</text>
+<text class="white" style="font:700 15px Arial,sans-serif" x="535" y="351">УПРАВЛЕНИЕ КЛАПАНАМИ</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="378">GPIO4, 14, 17, 19 — наполнение</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="403">GPIO13, 16, 18, 21 — сброс</text>
+<text class="white" style="font:700 15px Arial,sans-serif" x="535" y="450">КОМПРЕССОР</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="477">GPIO22 → драйвер реле</text>
+<line x1="520" y1="502" x2="810" y2="502" stroke="#3c4d65" stroke-width="2"/>
+<text class="white" style="font:700 15px Arial,sans-serif" x="535" y="535">РАДИОСВЯЗЬ</text>
+<text class="white" style="font:14px Arial,sans-serif" x="535" y="561">Зашифрованный ESP-NOW · канал 1</text>
+<text class="white" style="font:13px Arial,sans-serif" x="535" y="588">Профили и пороги изменяются с пульта</text>
+
+<!-- drivers / actuators -->
+<rect class="panel" x="905" y="125" width="535" height="520" rx="18"/>
+<text class="h" x="935" y="162">СИЛОВЫЕ ВЫХОДЫ · ВНЕШНИЕ ДРАЙВЕРЫ</text>
+<text class="small" x="935" y="188">Не подключать клапаны и компрессор напрямую к ESP32</text>
+<rect class="driver" x="935" y="220" width="270" height="300" rx="15"/>
+<text class="h" x="963" y="255">MOSFET / реле</text>
+<text class="body" x="963" y="292">GPIO4  → FL накачка</text>
+<text class="body" x="963" y="332">GPIO13 → FL сброс</text>
+<text class="body" x="963" y="372">GPIO14 → FR накачка</text>
+<text class="body" x="963" y="412">GPIO16 → FR сброс</text>
+<text class="body" x="963" y="452">GPIO17/18 → RL накачка/сброс</text>
+<text class="body" x="963" y="492">GPIO19/21 → RR накачка/сброс</text>
+<rect class="act" x="1240" y="220" width="175" height="150" rx="15"/>
+<text class="h" x="1265" y="258">8 клапанов</text>
+<text class="small" x="1265" y="287">По паре на каждое</text>
+<text class="small" x="1265" y="310">колесо</text>
+<path class="wireD" marker-end="url(#arrowD)" d="M1205 294H1240"/>
+<path class="wireD" marker-end="url(#arrowD)" d="M1205 420H1240"/>
+<rect class="driver" x="935" y="545" width="270" height="68" rx="15"/>
+<text class="body" x="963" y="574">GPIO22 → реле/драйвер</text><text class="small" x="963" y="597">компрессора</text>
+<rect class="act" x="1240" y="545" width="175" height="68" rx="15"/>
+<text class="body" x="1260" y="585">Компрессор</text>
+<path class="wireC" marker-end="url(#arrowC)" d="M1205 578H1240"/>
+
+<!-- remotes -->
+<rect class="remote" x="490" y="690" width="350" height="95" rx="18"/>
+<text class="h" x="520" y="728">Пульт T-Display</text><text class="body" x="520" y="758">Профили · калибровка · пороги</text>
+<rect class="remote" x="905" y="690" width="350" height="95" rx="18"/>
+<text class="h" x="935" y="728">Пульт 2″ ST7789</text><text class="body" x="935" y="758">Те же настройки из контроллера</text>
+<path class="wireW" d="M665 690V645H665V615"/>
+<path class="wireW" d="M1080 690V665H800V600"/>
+<text class="small" x="690" y="662">ESP-NOW</text>
+
+<!-- power and safety -->
+<rect class="panel" x="45" y="700" width="1395" height="190" rx="18"/>
+<text class="h" x="75" y="740">ПИТАНИЕ И ЗАЩИТА</text>
+<text class="body" x="75" y="778">Автомобильное питание → отдельные предохранители → драйверы клапанов и компрессора.</text>
+<text class="body" x="75" y="812">Питание ESP32 и датчиков — через стабилизированный источник. Общая сигнальная земля для датчиков, ESP32 и драйверов.</text>
+<text class="body" x="75" y="846">Добавьте защиту от выбросов катушек. Проверьте логику клапанов и аварийное закрытие без пневмосистемы.</text>
+<g transform="translate(75 864)">
+ <line class="wireA" x1="0" y1="0" x2="45" y2="0"/><text class="small" x="55" y="5">аналоговые датчики</text>
+ <line class="wireD" x1="250" y1="0" x2="295" y2="0"/><text class="small" x="305" y="5">клапаны</text>
+ <line class="wireC" x1="430" y1="0" x2="475" y2="0"/><text class="small" x="485" y="5">компрессор</text>
+ <line class="wireW" x1="650" y1="0" x2="695" y2="0"/><text class="small" x="705" y="5">радиоканал</text>
+</g>
+</svg>
