@@ -46,7 +46,7 @@ void render();
 void choosePreset(uint8_t p);
 void updateArrival();
 void refreshTelemetry();
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
 void onEspNowSend(const const uint8_t *, esp_now_send_status_t status);
 void setupEspNow();
 void serviceEspNow();
@@ -264,14 +264,14 @@ bool addControllerPeer(const uint8_t *mac) {
   if (esp_now_add_peer(&peer) != ESP_OK) return false;
   memcpy(controllerMac, mac, 6); controllerPeerKnown = true; return true;
 }
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (!info || !data) return;
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = CONNECTING;
-    if (addControllerPeer(info->src_addr)) { const uint8_t confirm[2] = {0xE1,0x02}; esp_now_send(controllerMac, confirm, sizeof(confirm)); }
+    if (addControllerPeer(mac_addr)) { const uint8_t confirm[2] = {0xE1,0x02}; esp_now_send(controllerMac, confirm, sizeof(confirm)); }
     return;
   }
-  if (!controllerPeerKnown || memcmp(controllerMac, info->src_addr, 6) != 0) return;
+  if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
   if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
     memcpy(&receivedSettings, data, sizeof(receivedSettings)); settingsFramePending = true;
   } else if (len == (int)sizeof(PressurePacket) && data[0] == 0xA1) {
