@@ -88,7 +88,6 @@ void updateBatteryChargeAnimation();
 
 void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 void onEspNowSend(const wifi_tx_info_t *, esp_now_send_status_t status);
-void bluetooth();
 
 constexpr uint8_t ESPNOW_CHANNEL = 1;
 const uint8_t ESPNOW_LMK[16] = {0x41,0x69,0x72,0x52,0x69,0x64,0x65,0x2D,0x32,0x30,0x32,0x36,0x2D,0x4B,0x31,0x21};
