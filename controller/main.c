@@ -173,7 +173,7 @@ static void sendSettings(void){
   for(uint8_t i=0;i<5;i++)f.zeroMilliVolts[i]=(int16_t)lroundf(config.zero[i]*1000.0f);
   f.check=checkBytes((const uint8_t*)&f,offsetof(SettingsFrame,check));esp_now_send(peerMac,(const uint8_t*)&f,sizeof(f));
 }
-static void sendAck(uint8_t opcode,bool ok){if(!linked||!encrypted)return;AckFrame a={.marker=0xA3,.opcode=opcode,.status=(uint8_t)(ok?1:0),.generation=config.generation};esp_now_send(peerMac,(const uint8_t*)&a,sizeof(a));}
+static void sendAck(uint8_t opcode,uint8_t status){if(!linked||!encrypted)return;AckFrame a={.marker=0xA3,.opcode=opcode,.status=status,.generation=config.generation};esp_now_send(peerMac,(const uint8_t*)&a,sizeof(a));}
 static void rx(const esp_now_recv_info_t *info,const uint8_t *data,int len){
   if(!info||!data||len<2)return;
   ESP_LOGI(TAG,"schematik-debug RX len=%d src=%02X:%02X:%02X:%02X:%02X:%02X data=%02X %02X",len,info->src_addr[0],info->src_addr[1],info->src_addr[2],info->src_addr[3],info->src_addr[4],info->src_addr[5],data[0],data[1]);
@@ -196,22 +196,25 @@ static void rx(const esp_now_recv_info_t *info,const uint8_t *data,int len){
   BaseType_t queued=commandQueue?xQueueSend(commandQueue,&c,0):pdFALSE;
   ESP_LOGI(TAG,"schematik-debug B1 command queue=%s opcode=%02X len=%d",queued==pdTRUE?"ok":"FULL_OR_UNREADY",data[1],len);
 }
-static bool calibrate(uint8_t s,uint16_t bar10){
+/* Calibration result: 1=stored, 2=invalid input, 3=offset out of range,
+ * 4=NVS write/read-back failed, 5=ADC read failed. */
+static uint8_t calibrate(uint8_t s,uint16_t bar10){
   if(s>4||bar10>(s==4?150:100)){
-    return false;
+    ESP_LOGW(TAG,"Calibration rejected: invalid sensor=%u reference_dbar=%u",(unsigned)s,(unsigned)bar10);
+    return 2;
   }
   ESP_LOGI(TAG,"Calibration request sensor=%u reference_dbar=%u",(unsigned)s,(unsigned)bar10);
   stopAll();float sum=0;
-  for(uint8_t i=0;i<32;i++){int r;esp_err_t e=adc_oneshot_read(adc,channel[s],&r);if(e!=ESP_OK){ESP_LOGE(TAG,"Calibration ADC read failed: %s",esp_err_to_name(e));return false;}sum+=(float)r*3.3f/4095.0f*(28.0f/18.0f);vTaskDelay(pdMS_TO_TICKS(2));}
+  for(uint8_t i=0;i<32;i++){int r;esp_err_t e=adc_oneshot_read(adc,channel[s],&r);if(e!=ESP_OK){ESP_LOGE(TAG,"Calibration ADC read failed: %s",esp_err_to_name(e));return 5;}sum+=(float)r*3.3f/4095.0f*(28.0f/18.0f);vTaskDelay(pdMS_TO_TICKS(2));}
   const float knownPsi=((float)bar10/10.0f)/.0689476f;
   const float z=sum/32.0f-knownPsi/(sensorFullScalePsi[s]/4.0f);
-  if(!isfinite(z)||z<.2f||z>.8f){ESP_LOGE(TAG,"Calibration rejected: computed offset %.3f V outside 0.2..0.8 V",(double)z);return false;}
+  if(!isfinite(z)||z<.2f||z>.8f){ESP_LOGE(TAG,"Calibration rejected: computed offset %.3f V outside 0.2..0.8 V",(double)z);return 3;}
   ControllerConfig next=config;next.zero[s]=z;next.calibrationReferenceDbar[s]=bar10;next.calibratedMask|=(uint8_t)(1U<<s);
   ESP_LOGI(TAG,"Calibration computed offset=%.3f V",(double)z);
   bool saved=persistConfig(next);ESP_LOGI(TAG,"Calibration save result=%s",saved?"verified":"FAILED");
-  if(!saved)return false;
+  if(!saved)return 4;
   calBar10[s]=bar10;calValidMask|=(uint8_t)(1U<<s);
-  return true;
+  return 1;
 }
 static void manualStart(uint8_t w,bool up,float p[5]){if(w>3||!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w))))return;cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
 static void targetStart(uint8_t w,uint16_t b){if(w>3||b>config.wheelLimitDbar[w])return;cancel(w);jobs[w].active=true;jobs[w].goal=((float)b/10.0f)/.0689476f;jobs[w].start=jobs[w].next=now();}
@@ -245,11 +248,11 @@ static void runJob(uint8_t w,float p[5]){
 static void process(const uint8_t *c,uint8_t len,float p[5]){
   if(len<2||c[0]!=0xB1)return;
   if(len==2&&c[1]==0x42){sendSettings();return;}
-  if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok);sendSettings();return;}
+  if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok?1:0);sendSettings();return;}
   if(len==5&&c[1]==0x40){uint16_t v=readLe16(&c[3]);targetStart(c[2],v);return;}
   if(len==3&&c[1]==0x44){presetStart(c[2]);return;}
   if(len==4&&c[1]==0x45){uint8_t preset=c[2],wheel=c[3];if(preset<3&&wheel<4)targetStart(wheel,config.presetDbar[preset][wheel]);return;}
-  if(len==5&&c[1]==0x41){bool ok=calibrate(c[2],readLe16(&c[3]));sendAck(0x41,ok);sendSettings();if(ok)sendCalibrationState();return;}
+  if(len==5&&c[1]==0x41){uint8_t status=calibrate(c[2],readLe16(&c[3]));sendAck(0x41,status);sendSettings();if(status==1)sendCalibrationState();return;}
   if(len==2&&c[1]==0x2F){stopAll();return;}
   if(len==2&&c[1]>=0x20&&c[1]<=0x27){manualStart((c[1]-0x20)/2,!(c[1]&1),p);return;}
   if(len==2&&c[1]>=0x30&&c[1]<=0x33)cancel(c[1]-0x30);
