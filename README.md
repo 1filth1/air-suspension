@@ -1,5 +1,7 @@
 # Air Suspension
 
+**Веб‑флешер:** [прошить устройство](webflasher/index.html) · [скачать прошивки v0.1.0-rc.1](https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1)
+
 ESP32 based air-suspension controller with pressure telemetry and wireless remotes.
 
 ## Current release candidate scope
