@@ -125,6 +125,8 @@ int shownPressure[5] = {-9999, -9999, -9999, -9999, -9999};
 bool lastButton[BUTTON_COUNT] = {};
 bool telemetry = false;
 bool linked = false;
+volatile bool discoveryConfirmPending = false;
+volatile uint32_t discoveryConfirmAtMs = 0;
 bool manualMode = false, valveOpen = false, presetRunning = false, presetStopSent = false;
 bool wheelComplete[4] = {}, wheelAlarm[4] = {};
 float lockedPressure[4] = {NAN, NAN, NAN, NAN};
@@ -268,7 +270,12 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (!mac_addr || !data) return;
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = CONNECTING;
-    if (addControllerPeer(mac_addr)) { const uint8_t confirm[2] = {0xE1,0x02}; esp_now_send(controllerMac, confirm, sizeof(confirm)); }
+    if (addControllerPeer(mac_addr)) {
+      // Wait for the controller to switch from its temporary open peer to
+      // the encrypted peer before sending the encrypted confirmation.
+      discoveryConfirmAtMs = millis() + 250U;
+      discoveryConfirmPending = true;
+    }
     return;
   }
   if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
@@ -296,10 +303,15 @@ void setupEspNow() {
 void sendDiscovery() { const uint8_t hello[2] = {0xE1,0x01}; esp_now_send(ESPNOW_BROADCAST, hello, sizeof(hello)); }
 void serviceEspNow() {
   const uint32_t now = millis();
+  if (discoveryConfirmPending && (int32_t)(now - discoveryConfirmAtMs) >= 0) {
+    discoveryConfirmPending = false;
+    const uint8_t confirm[2] = {0xE1, 0x02};
+    esp_now_send(controllerMac, confirm, sizeof(confirm));
+  }
   const bool fresh = controllerPeerKnown && now - lastControllerPacketMs < CONTROLLER_TIMEOUT_MS;
   if (fresh != linked) {
     linked = fresh; bleState = fresh ? CONNECTED : RETRYING;
-    if (!fresh) { if (controllerPeerKnown) esp_now_del_peer(controllerMac); controllerPeerKnown = false; controllerSettingsLoaded = false; memset(controllerMac, 0, sizeof(controllerMac)); lastControllerPacketMs = 0; lastDiscoveryMs = now; }
+    if (!fresh) { if (controllerPeerKnown) esp_now_del_peer(controllerMac); controllerPeerKnown = false; discoveryConfirmPending = false; controllerSettingsLoaded = false; memset(controllerMac, 0, sizeof(controllerMac)); lastControllerPacketMs = 0; lastDiscoveryMs = now; }
     if (page == HOME) footer();
   }
   if (!fresh && now - lastDiscoveryMs >= DISCOVERY_INTERVAL_MS) { lastDiscoveryMs = now; sendDiscovery(); if (page == HOME) footer(); }
