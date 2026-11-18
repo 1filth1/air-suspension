@@ -18,21 +18,13 @@ button:disabled{opacity:.45;cursor:not-allowed}.actions{display:flex;gap:12px;al
 progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small{color:var(--muted)}a{color:var(--accent)}
 @media(max-width:640px){.row{grid-template-columns:1fr}main{margin:20px auto}.card{padding:18px}}
 </style>
-<script type="importmap">
-{
-  "imports": {
-    "esptool-js": "https://unpkg.com/esptool-js@0.7.1/lib/index.js",
-    "pako": "https://unpkg.com/pako@2.1.0/dist/pako.esm.mjs",
-    "atob-lite": "https://unpkg.com/atob-lite@2.0.0/atob-browser.js"
-  }
-}
-</script>
+
 </head>
 <body>
 <main>
 <div class="card">
 <h1>Air Suspension · Web Flasher</h1>
-<p>Выбери выпуск и устройство, скачай соответствующий HEX-файл со страницы GitHub-релиза и прошей плату через USB.</p>
+<p>Выбери выпуск и устройство — флешер сам загрузит нужный HEX-файл из GitHub-релиза. Затем подключи плату через USB.</p>
 <div class="notice">Для прошивки нужен Chrome или Edge на HTTPS/localhost и USB-кабель с передачей данных. Пневматическую систему отключи на время обновления.</div>
 <div class="row">
 <div><label for="release">Релиз</label><select id="release"></select></div>
@@ -42,10 +34,8 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 <option value="remote-2inch">Пульт · ESP32, экран 2″ ST7789</option>
 </select></div>
 </div>
-<div class="actions"><a id="releaseLink" class="button" target="_blank" rel="noopener">Открыть релиз и скачать HEX</a></div>
-<label for="firmware">Файл прошивки Intel HEX</label>
-<input id="firmware" type="file" accept=".hex,.HEX">
-<small id="assetName"></small>
+<div class="actions"><a id="releaseLink" class="button" target="_blank" rel="noopener">Открыть страницу релиза</a></div>
+<div class="notice" style="margin-top:16px"><strong id="assetName">Загружаю файл прошивки…</strong></div>
 <div class="warning" style="margin-top:16px">Обычная прошивка сохраняет настройки контроллера в NVS. Отметка ниже полностью стирает flash, включая сохранённые профили и калибровки.</div>
 <label style="font-weight:500"><input id="eraseAll" type="checkbox"> Полностью стереть flash перед записью</label>
 <div class="actions"><button id="flash" disabled>Подключить плату и прошить</button><span id="chip"></span></div>
@@ -57,11 +47,13 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 <script type="module">
 let esptoolApi = null;
 let esptoolLoadError = null;
-import("esptool-js").then((api) => { esptoolApi = api; }).catch((error) => { esptoolLoadError = error; });
+const esptoolReady = import("https://esm.sh/esptool-js@0.7.1")
+  .then((api) => { esptoolApi = api; })
+  .catch((error) => { esptoolLoadError = error; });
 const $ = (id) => document.getElementById(id);
-const releaseSelect = $("release"), deviceSelect = $("device"), fileInput = $("firmware");
+const releaseSelect = $("release"), deviceSelect = $("device");
 const status = $("status"), flashButton = $("flash"), progress = $("progress");
-let releases = [], selectedFile = null;
+let releases = [], firmwareText = null, firmwareKey = "", loadToken = 0;
 const devices = {
   controller: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-controller.hex" },
   "t-display": { chip: "ESP32-S3", flashSize: "8MB", asset: "air-suspension-remote-t-display.hex" },
@@ -73,7 +65,37 @@ function updateRelease() {
   const release = selectedRelease(), device = devices[deviceSelect.value];
   $("releaseLink").href = release?.url || "#";
   $("assetName").textContent = release ? "Нужный файл: " + device.asset : "";
-  flashButton.disabled = !release || !selectedFile;
+  const key = release ? release.tag + ":" + deviceSelect.value : "";
+  if (key !== firmwareKey) {
+    firmwareKey = key;
+    firmwareText = null;
+    if (release) loadFirmware(release, deviceSelect.value);
+  }
+  flashButton.disabled = !release || !firmwareText || !esptoolApi;
+}
+async function loadFirmware(release, deviceId) {
+  const token = ++loadToken;
+  const device = devices[deviceId];
+  const asset = release.assets?.[deviceId] || device.asset;
+  const url = "https://github.com/1filth1/air-suspension/releases/download/" +
+    encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset);
+  $("assetName").textContent = "Скачиваю " + asset + "…";
+  flashButton.disabled = true;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("GitHub вернул HTTP " + response.status);
+    const text = await response.text();
+    if (token !== loadToken) return;
+    if (!text.startsWith(":") || !text.includes("\\n:")) throw new Error("Файл релиза не похож на Intel HEX.");
+    firmwareText = text;
+    $("assetName").textContent = "Прошивка загружена: " + asset;
+    say("Загружена прошивка " + release.label + " · " + asset + ". Можно подключать плату.");
+    flashButton.disabled = !esptoolApi;
+  } catch (error) {
+    if (token !== loadToken) return;
+    $("assetName").textContent = "Не удалось загрузить " + asset + ".";
+    say("Ошибка загрузки прошивки: " + (error?.message || error) + "\\nПроверь доступность файла в релизе.");
+  }
 }
 async function loadCatalog() {
   try {
@@ -82,32 +104,21 @@ async function loadCatalog() {
     releases = (await response.json()).releases || [];
     releaseSelect.replaceChildren(...releases.map((item) => new Option(item.label || item.tag, item.tag)));
     if (!releases.length) throw new Error("В каталоге пока нет релизов.");
-    say("Выбери файл HEX соответствующего устройства. Сначала скачай его со страницы релиза.");
+    await esptoolReady;
     updateRelease();
   } catch (error) { say("Не удалось загрузить каталог: " + error.message); }
 }
 releaseSelect.addEventListener("change", updateRelease);
 deviceSelect.addEventListener("change", updateRelease);
-fileInput.addEventListener("change", () => {
-  selectedFile = fileInput.files?.[0] || null;
-  const release = selectedRelease(), expected = devices[deviceSelect.value].asset;
-  if (selectedFile && selectedFile.name !== expected) {
-    say("Выбран файл " + selectedFile.name + ". Для выбранного устройства ожидается " + expected + ".");
-    flashButton.disabled = true;
-    return;
-  }
-  updateRelease();
-  if (selectedFile) say("Файл готов: " + selectedFile.name);
-});
 flashButton.addEventListener("click", async () => {
   const release = selectedRelease(), device = devices[deviceSelect.value];
-  if (!selectedFile || !release) return;
+  if (!firmwareText || !release) return;
   let port, transport;
   flashButton.disabled = true;
   progress.value = 0;
   try {
     if (!("serial" in navigator)) throw new Error("Этот браузер не поддерживает Web Serial. Открой страницу в Chrome или Edge.");
-    if (!esptoolApi) throw new Error("Модуль прошивки ещё не загружен. Обнови страницу и попробуй снова." + (esptoolLoadError?.message ? " " + esptoolLoadError.message : ""));
+    if (!esptoolApi) throw new Error("Не удалось загрузить модуль прошивки: " + (esptoolLoadError?.message || "повтори обновление страницы."));
     const { ESPLoader, Transport, parseIntelHex } = esptoolApi;
     port = await navigator.serial.requestPort();
     transport = new Transport(port, true);
@@ -121,7 +132,7 @@ flashButton.addEventListener("click", async () => {
     if (!chipName.toUpperCase().includes(device.chip)) {
       throw new Error("Выбрана прошивка для " + device.chip + ", подключена " + chipName + ".");
     }
-    const segments = parseIntelHex(await selectedFile.text());
+    const segments = parseIntelHex(firmwareText);
     if (!segments.length) throw new Error("В HEX-файле нет областей для записи.");
     say("Прошиваю " + release.label + " · " + device.asset);
     await loader.writeFlash({
@@ -141,7 +152,7 @@ flashButton.addEventListener("click", async () => {
     say("Ошибка прошивки: " + (error?.message || error));
   } finally {
     if (transport) { try { await transport.disconnect(); } catch {} }
-    flashButton.disabled = !selectedFile || !selectedRelease();
+    flashButton.disabled = !firmwareText || !selectedRelease() || !esptoolApi;
   }
 });
 loadCatalog();
