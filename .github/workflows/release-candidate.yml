@@ -27,7 +27,7 @@ jobs:
         run: |
           . /opt/esp/idf/export.sh
           idf.py build
-          idf.py merge-bin -f hex -o build/air-suspension-controller.hex
+          idf.py merge-bin -f hex -o air-suspension-controller.hex
       - uses: actions/upload-artifact@v4
         with:
           name: controller-hex
