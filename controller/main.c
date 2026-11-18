@@ -40,7 +40,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) { uint32_t magic; uint32_t revision; float zero[5]; uint32_t check; } LegacyCalibrationStore;
 typedef struct __attribute__((packed)) {
   uint8_t marker,version; uint32_t generation;
-  uint16_t wheelLimitDbar[4]; uint16_t tankLimitDbar;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
   uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
