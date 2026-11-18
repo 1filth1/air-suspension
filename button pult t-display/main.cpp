@@ -379,6 +379,8 @@ const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
 float pressure[5] = {NAN,NAN,NAN,NAN,NAN};
 uint16_t target[3][4]={{20,20,20,20},{55,55,55,55},{80,80,80,80}};
 bool linked=false, scanning=false, sleepMode=false;
+volatile bool discoveryConfirmPending = false;
+volatile uint32_t discoveryConfirmAtMs = 0;
 bool manualMode=false;
 
 // The historical BLE state labels are retained for the on-screen connection
@@ -1290,8 +1292,11 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = BLE_CONNECTING;
     if (addControllerPeer(mac_addr)) {
-      const EspNowDiscoveryPacket confirm = {0xE1, 0x02};
-      esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&confirm), sizeof(confirm));
+      // The controller switches to its encrypted peer after its clear reply
+      // has had time to leave the radio. Delay our encrypted confirmation so
+      // it arrives after that switch, not during the open-peer window.
+      discoveryConfirmAtMs = millis() + 250U;
+      discoveryConfirmPending = true;
     }
     return;
   }
@@ -1342,6 +1347,11 @@ void sendDiscovery() {
 
 void serviceEspNow() {
   const uint32_t now = millis();
+  if (discoveryConfirmPending && (int32_t)(now - discoveryConfirmAtMs) >= 0) {
+    discoveryConfirmPending = false;
+    const EspNowDiscoveryPacket confirm = {0xE1, 0x02};
+    esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&confirm), sizeof(confirm));
+  }
   const bool fresh = controllerPeerKnown && (now - lastControllerPacketMs < CONTROLLER_TIMEOUT_MS);
   if (fresh != linked) {
     linked = fresh;
@@ -1354,6 +1364,7 @@ void serviceEspNow() {
       // sends encrypted E1 02 exactly like the first connection.
       if (controllerPeerKnown) esp_now_del_peer(controllerMac);
       controllerPeerKnown = false;
+      discoveryConfirmPending = false;
       controllerSettingsLoaded = false;
       memset(controllerMac, 0, sizeof(controllerMac));
       lastControllerPacketMs = 0;
