@@ -362,6 +362,8 @@ void compressorMenu();
 void drawCompressorValue(uint8_t row, bool selected);
 void saveCompressorThreshold(uint8_t which);
 void sendSettingsUpdate();
+void sendCalibrationUpdate();
+void loadCalibrationReference(uint8_t sensor);
 void applyControllerSettings();
 void transitionTo(uint8_t newPage, uint8_t newCursor = 0);
 
@@ -377,7 +379,7 @@ volatile bool settingsFramePending = false;
 SettingsAckFrame receivedSettingsAck = {};
 volatile bool settingsAckFramePending = false;
 SettingsFrame controllerSettings = {};
-enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT };
+enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_WAITING, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT };
 SettingsSaveState settingsSaveState = SETTINGS_SAVE_IDLE;
 uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
 bool settingsSavePending = false;
@@ -1033,6 +1035,7 @@ void drawEditorWheel(uint8_t index, bool selected) {
 }
 
 const char *settingsSaveMessage() {
+  if (settingsSavePending) return "SAVING TO MAIN";
   if ((int32_t)(settingsSaveUntilMs - millis()) <= 0) return nullptr;
   if (settingsSaveState == SETTINGS_SAVE_SAVED) return "SAVED TO MAIN";
   if (settingsSaveState == SETTINGS_SAVE_FAILED) return "SAVE FAILED";
@@ -1063,7 +1066,8 @@ void drawCalibrationSensor(uint8_t index, bool selected) {
 void calibration() {
   top("CALIBRATE");
   for (uint8_t i = 0; i < 5; ++i) drawCalibrationSensor(i, i == calSensor);
-  foot("UP/DN gauge  OK save/next  BACK menu");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : (controllerSettingsLoaded ? "UP/DN ref  OK save/next  BACK menu" : "WAIT FOR CONTROLLER SETTINGS"));
 }
 
 void drawCompressorValue(uint8_t row, bool selected) {
@@ -1105,7 +1109,36 @@ void sendSettingsUpdate() {
   memcpy(&packet[46], &checksum, sizeof(checksum));
   sendCommand(packet, sizeof(packet));
   settingsSavePending = true;
+  settingsSaveState = SETTINGS_SAVE_WAITING;
   settingsSaveDeadlineMs = millis() + 1500U;
+}
+
+void sendCalibrationUpdate() {
+  if (!controllerSettingsLoaded || !linked) {
+    settingsSavePending = false;
+    settingsSaveState = SETTINGS_SAVE_FAILED;
+    settingsSaveUntilMs = millis() + 1400U;
+    if (page == 5) calibration();
+    return;
+  }
+  const uint8_t packet[] = {0xB1, 0x41, calSensor, (uint8_t)calValue, (uint8_t)(calValue >> 8)};
+  sendCommand(packet, sizeof(packet));
+  settingsSavePending = true;
+  settingsSaveState = SETTINGS_SAVE_WAITING;
+  settingsSaveDeadlineMs = millis() + 1500U;
+}
+
+void loadCalibrationReference(uint8_t sensor) {
+  if (sensor >= 5) return;
+  const uint16_t maximum = sensor == 4 ? 150 : 100;
+  if (controllerSettingsLoaded && (controllerSettings.calibratedMask & (1U << sensor))) {
+    calValue = controllerSettings.calibrationReferenceDbar[sensor];
+  } else if (!isnan(pressure[sensor])) {
+    calValue = (uint16_t)constrain((int)lroundf(pressure[sensor] * 10.0f), 0, maximum);
+  } else {
+    calValue = 0;
+  }
+  if (calValue > maximum) calValue = maximum;
 }
 
 void applyControllerSettings() {
@@ -1123,6 +1156,7 @@ void applyControllerSettings() {
   compressorOffBar10 = snapshot.tankLimitDbar;
   controllerSettingsLoaded = true;
   if (page == 4) editor();
+  else if (page == 5) calibration();
   else if (page == 10) compressorMenu();
 }
 
@@ -1134,7 +1168,7 @@ void serviceSettingsSaveFeedback() {
     memcpy(&ack, &receivedSettingsAck, sizeof(ack));
     settingsAckFramePending = false;
     interrupts();
-    if (ack.marker == 0xA3 && ack.opcode == 0x43) {
+    if (ack.marker == 0xA3 && (ack.opcode == 0x43 || ack.opcode == 0x41)) {
       settingsSavePending = false;
       settingsSaveState = ack.status ? SETTINGS_SAVE_SAVED : SETTINGS_SAVE_FAILED;
       settingsSaveUntilMs = millis() + 1400U;
@@ -1153,6 +1187,7 @@ void serviceSettingsSaveFeedback() {
   }
   if (redraw) {
     if (page == 10) compressorMenu();
+    else if (page == 5) calibration();
     else if (page == 4) editor();
   }
 }
@@ -1353,7 +1388,7 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   }
 
   if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
-  if (len == (int)sizeof(SettingsAckFrame) && data[0] == 0xA3 && data[1] == 0x43) {
+  if (len == (int)sizeof(SettingsAckFrame) && data[0] == 0xA3 && (data[1] == 0x43 || data[1] == 0x41)) {
     memcpy(&receivedSettingsAck, data, sizeof(receivedSettingsAck));
     settingsAckFramePending = true;
     lastControllerPacketMs = millis();
@@ -1783,7 +1818,7 @@ void action(Key k){
       else if(cursor==1){editPreset=editWheel=0; transitionTo(4);}
       else if(cursor==2){
         calSensor=0;
-        calValue=isnan(pressure[0]) ? 0 : (uint16_t)constrain((int)lroundf(pressure[0]*10.0f),0,150);
+        loadCalibrationReference(calSensor);
         transitionTo(5);
       }
       else if(cursor==3) {transitionTo(6, 0);}
@@ -1834,7 +1869,9 @@ void action(Key k){
     }
     if (k == BACK) { transitionTo(2, 1); }
   } else if(page==5){
-    if (k == UP && calValue < 150) {
+    if (!controllerSettingsLoaded) return;
+    const uint16_t calibrationMaximum = calSensor == 4 ? 150 : 100;
+    if (k == UP && calValue < calibrationMaximum) {
       calValue++;
       drawCalibrationSensor(calSensor, true);
       return;
@@ -1846,11 +1883,10 @@ void action(Key k){
     }
     if (k == KEYOK) {
       stopAll();
-      const uint8_t p[]={0xB1,0x41,calSensor,(uint8_t)calValue,(uint8_t)(calValue>>8)};
-      sendCommand(p,sizeof(p));
+      sendCalibrationUpdate();
       const uint8_t oldSensor = calSensor;
       calSensor = (calSensor + 1) % 5;
-      calValue = isnan(pressure[calSensor]) ? 0 : (uint16_t)constrain((int)lroundf(pressure[calSensor] * 10.0f), 0, 150);
+      loadCalibrationReference(calSensor);
       drawCalibrationSensor(oldSensor, false);
       drawCalibrationSensor(calSensor, true);
       return;
