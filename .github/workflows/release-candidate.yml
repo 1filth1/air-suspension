@@ -7,6 +7,7 @@ on:
       - "button pult t-display/**"
       - "buttonpult 2 inch/**"
       - ".github/workflows/release-candidate.yml"
+      - "webflasher/releases.json"
   push:
     tags:
       - "v*-rc*"
