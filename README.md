@@ -48,7 +48,7 @@ A release candidate is created by pushing a tag like v0.1.0-rc.1. The workflow b
 
 ## Web flasher
 
-Open the [web flasher](https://1filth1.github.io/air-suspension/webflasher/) in Chrome or Edge. Choose the release and device, download the matching Intel HEX asset from the private GitHub release, select that file in the flasher, then connect the board over USB.
+Open the [web flasher](https://1filth1.github.io/air-suspension/webflasher/) in Chrome or Edge. Choose the release and device, download the matching Intel HEX asset from the GitHub release, select that file in the flasher, then connect the board over USB.
 
 The HEX images are sparse: flashing updates the bootloader, partition table and app without erasing the NVS sector that stores vehicle settings. Use the explicit “erase all” option only when you intend to reset all controller settings.
 
