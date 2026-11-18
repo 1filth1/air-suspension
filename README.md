@@ -1,6 +1,6 @@
 # Air Suspension
 
-**Веб‑флешер:** [прошить устройство](webflasher/index.html) · [скачать прошивки v0.1.0-rc.1](https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1)
+**Веб‑флешер:** [запустить флешер](https://1filth1.github.io/air-suspension/webflasher/) · [скачать прошивки v0.1.0-rc.1](https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1)
 
 ESP32 based air-suspension controller with pressure telemetry and wireless remotes.
 
@@ -48,7 +48,7 @@ A release candidate is created by pushing a tag like v0.1.0-rc.1. The workflow b
 
 ## Web flasher
 
-Open [webflasher/index.html](webflasher/index.html) from a local web server or a secure GitHub Pages URL in Chrome or Edge. Choose the release and device, download the matching Intel HEX asset from the private GitHub release, select that file in the flasher, then connect the board over USB.
+Open the [web flasher](https://1filth1.github.io/air-suspension/webflasher/) in Chrome or Edge. Choose the release and device, download the matching Intel HEX asset from the private GitHub release, select that file in the flasher, then connect the board over USB.
 
 The HEX images are sparse: flashing updates the bootloader, partition table and app without erasing the NVS sector that stores vehicle settings. Use the explicit “erase all” option only when you intend to reset all controller settings.
 
