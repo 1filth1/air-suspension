@@ -379,7 +379,7 @@ volatile bool settingsFramePending = false;
 SettingsAckFrame receivedSettingsAck = {};
 volatile bool settingsAckFramePending = false;
 SettingsFrame controllerSettings = {};
-enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_WAITING, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT };
+enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_WAITING, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT, CAL_SAVE_INPUT, CAL_SAVE_RANGE, CAL_SAVE_NVS, CAL_SAVE_ADC };
 SettingsSaveState settingsSaveState = SETTINGS_SAVE_IDLE;
 uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
 bool settingsSavePending = false;
@@ -1040,6 +1040,10 @@ const char *settingsSaveMessage() {
   if (settingsSaveState == SETTINGS_SAVE_SAVED) return "SAVED TO MAIN";
   if (settingsSaveState == SETTINGS_SAVE_FAILED) return "SAVE FAILED";
   if (settingsSaveState == SETTINGS_SAVE_TIMEOUT) return "SAVE NO REPLY";
+  if (settingsSaveState == CAL_SAVE_INPUT) return "INVALID CAL VALUE";
+  if (settingsSaveState == CAL_SAVE_RANGE) return "OFFSET OUT OF RANGE";
+  if (settingsSaveState == CAL_SAVE_NVS) return "NVS WRITE FAILED";
+  if (settingsSaveState == CAL_SAVE_ADC) return "ADC READ FAILED";
   return nullptr;
 }
 
@@ -1170,8 +1174,12 @@ void serviceSettingsSaveFeedback() {
     interrupts();
     if (ack.marker == 0xA3 && (ack.opcode == 0x43 || ack.opcode == 0x41)) {
       settingsSavePending = false;
-      settingsSaveState = ack.status ? SETTINGS_SAVE_SAVED : SETTINGS_SAVE_FAILED;
-      settingsSaveUntilMs = millis() + 1400U;
+      if (ack.opcode == 0x41 && ack.status == 2) settingsSaveState = CAL_SAVE_INPUT;
+      else if (ack.opcode == 0x41 && ack.status == 3) settingsSaveState = CAL_SAVE_RANGE;
+      else if (ack.opcode == 0x41 && ack.status == 4) settingsSaveState = CAL_SAVE_NVS;
+      else if (ack.opcode == 0x41 && ack.status == 5) settingsSaveState = CAL_SAVE_ADC;
+      else settingsSaveState = ack.status == 1 ? SETTINGS_SAVE_SAVED : SETTINGS_SAVE_FAILED;
+      settingsSaveUntilMs = millis() + 1800U;
       redraw = true;
     }
   }
