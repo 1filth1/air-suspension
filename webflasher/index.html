@@ -32,7 +32,7 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 <main>
 <div class="card">
 <h1>Air Suspension · Web Flasher</h1>
-<p>Выбери выпуск и устройство, скачай соответствующий файл .hex из приватного GitHub-релиза и прошей плату через USB.</p>
+<p>Выбери выпуск и устройство, скачай соответствующий HEX-файл со страницы GitHub-релиза и прошей плату через USB.</p>
 <div class="notice">Для прошивки нужен Chrome или Edge на HTTPS/localhost и USB-кабель с передачей данных. Пневматическую систему отключи на время обновления.</div>
 <div class="row">
 <div><label for="release">Релиз</label><select id="release"></select></div>
@@ -55,7 +55,9 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 <p><small>Исходный код и схема: <a href="https://github.com/1filth1/air-suspension">github.com/1filth1/air-suspension</a>. Для локального запуска: python -m http.server 8000 в каталоге webflasher.</small></p>
 </main>
 <script type="module">
-import { ESPLoader, Transport, parseIntelHex } from "esptool-js";
+let esptoolApi = null;
+let esptoolLoadError = null;
+import("esptool-js").then((api) => { esptoolApi = api; }).catch((error) => { esptoolLoadError = error; });
 const $ = (id) => document.getElementById(id);
 const releaseSelect = $("release"), deviceSelect = $("device"), fileInput = $("firmware");
 const status = $("status"), flashButton = $("flash"), progress = $("progress");
@@ -105,6 +107,8 @@ flashButton.addEventListener("click", async () => {
   progress.value = 0;
   try {
     if (!("serial" in navigator)) throw new Error("Этот браузер не поддерживает Web Serial. Открой страницу в Chrome или Edge.");
+    if (!esptoolApi) throw new Error("Модуль прошивки ещё не загружен. Обнови страницу и попробуй снова." + (esptoolLoadError?.message ? " " + esptoolLoadError.message : ""));
+    const { ESPLoader, Transport, parseIntelHex } = esptoolApi;
     port = await navigator.serial.requestPort();
     transport = new Transport(port, true);
     const loader = new ESPLoader({
