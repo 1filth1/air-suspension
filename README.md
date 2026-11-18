@@ -1,59 +1,90 @@
 # Air Suspension
 
-**Веб‑флешер:** [запустить флешер](https://1filth1.github.io/air-suspension/webflasher/) · [скачать прошивки v0.1.0-rc.1](https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1)
+ESP32-система управления пневмоподвеской: контроллер измеряет давление, управляет клапанами и компрессором, а настройки изменяются с беспроводного пульта.
 
-ESP32 based air-suspension controller with pressure telemetry and wireless remotes.
+**[Открыть веб-флешер](https://1filth1.github.io/air-suspension/webflasher/)** · [Все релизы](https://github.com/1filth1/air-suspension/releases)
 
-## Current release candidate scope
+> Проект находится в стадии release candidate. Перед подключением пневматических исполнительных механизмов проверьте распиновку, логику выходов и аварийное отключение на стенде.
 
-The controller is the source of truth for vehicle setup:
+## Как устроена система
 
-- four wheel-pressure presets (PARK, DRIVE, LIFT);
-- wheel pressure limits and tank/compressor thresholds;
-- automatic regulation and manual valve timeouts;
-- sensor calibration offsets and calibration references.
+Контроллер на ESP32 DevKit V1 — основной источник настроек. В его энергонезависимой памяти NVS хранятся:
 
-The ESP32 controller saves these values in NVS. T-Display and 2-inch remotes request the settings after connecting, show controller values, and send edits back over encrypted ESP-NOW. The remote keeps only its own interface preferences, such as screen brightness and sound volume.
+- профили PARK, DRIVE и LIFT для четырёх колёс;
+- пределы давления колёс и ресивера;
+- пороги включения компрессора и параметры регулирования;
+- калибровки пяти датчиков давления и эталонные значения.
 
-The settings schema moves from v2 to v3. On first boot with this firmware the controller migrates existing calibration and controller limits, then adds the three preset profiles. Remote-local pressure presets are ignored. Controller NVS is preserved by the web flasher's sparse Intel HEX images.
+Пульты T-Display и 2″ ST7789 подключаются к контроллеру по зашифрованному ESP-NOW на канале 1. Пульт загружает настройки после соединения, показывает значения контроллера и отправляет изменения обратно. Экран, подсветка и громкость пульта остаются локальными настройками.
 
-## Hardware
+## Возможности
 
-- Controller: ESP32 DevKit V1
-- Remotes: ESP32-S3 T-Display and the 2-inch ST7789 remote
-- Pressure inputs: four wheel sensors and one tank sensor
-- Outputs: eight valve-driver signals and one compressor relay-driver signal
+- Телеметрия четырёх колёс и ресивера.
+- Запуск трёх профилей давления и ручное управление клапанами.
+- Автоматическая регулировка давления.
+- Настройка порогов компрессора с пульта.
+- Калибровка датчиков с сохранением в контроллере.
+- Подтверждение записи настроек на экране пульта.
+- Веб-флешер с выбором релиза и устройства.
 
-Use external drivers and fused vehicle power for valves and compressor. ESP32 GPIO pins are logic signals; do not connect inductive loads directly.
+## Состав
 
-See [the wiring diagram](docs/wiring.svg) and [wiring notes](docs/wiring.md).
+| Устройство | Назначение |
+| --- | --- |
+| ESP32 DevKit V1 | Контроллер, датчики, клапаны, компрессор |
+| ESP32-S3 T-Display | Цветной беспроводной пульт |
+| ESP32 + ST7789, 2″ | Дополнительный беспроводной пульт |
+| Внешние драйверы | Силовое управление клапанами и реле компрессора |
 
-## Firmware source
+Папки CYD содержат диагностические экраны и не являются поддерживаемыми пультами проекта.
 
-- [Controller](controller/main.c)
-- [T-Display remote](button%20pult%20t-display/main.cpp)
-- [2-inch remote](buttonpult%202%20inch/main.cpp)
+## Схема подключения
 
-The pult CYD folders contain display diagnostics, not supported controller remotes.
+![Схема подключения Air Suspension](docs/wiring.svg)
 
-## Build
+Распиновка, таблицы сигналов и требования к питанию приведены в [инструкции по подключению](docs/wiring.md).
 
-The controller is an ESP-IDF 5.4 project in controller/. The remotes are PlatformIO projects in their respective directories. GitHub Actions builds sparse Intel HEX images for each supported device.
+### Краткая распиновка контроллера
 
-A release candidate is created by pushing a tag like v0.1.0-rc.1. The workflow builds and attaches:
+| Сигнал | GPIO ESP32 | Канал |
+| --- | ---: | --- |
+| Переднее левое колесо | 32 | ADC1_CH4 |
+| Переднее правое колесо | 33 | ADC1_CH5 |
+| Заднее левое колесо | 34 | ADC1_CH6 |
+| Заднее правое колесо | 35 | ADC1_CH7 |
+| Ресивер | 36 | ADC1_CH0 |
+| Наполнение колёс FL / FR / RL / RR | 4 / 14 / 17 / 19 | Выходы драйверов |
+| Сброс колёс FL / FR / RL / RR | 13 / 16 / 18 / 21 | Выходы драйверов |
+| Реле/драйвер компрессора | 22 | Выход |
 
-- air-suspension-controller.hex
-- air-suspension-remote-t-display.hex
-- air-suspension-remote-2inch.hex
+## Прошивка
 
-## Web flasher
+Открой [веб-флешер](https://1filth1.github.io/air-suspension/webflasher/) в Chrome или Edge:
 
-Open the [web flasher](https://1filth1.github.io/air-suspension/webflasher/) in Chrome or Edge. Choose the release and device, download the matching Intel HEX asset from the GitHub release, select that file in the flasher, then connect the board over USB.
+1. Выбери релиз и тип платы.
+2. Подключи устройство к компьютеру по USB и выбери его в браузере.
+3. Запусти прошивку и дождись сообщения об успешном завершении.
+4. Повтори для контроллера и нужного пульта, выбрав одну и ту же версию.
 
-The HEX images are sparse: flashing updates the bootloader, partition table and app without erasing the NVS sector that stores vehicle settings. Use the explicit “erase all” option only when you intend to reset all controller settings.
+Файлы прошивки — разреженные Intel HEX: они обновляют загрузчик, таблицу разделов и приложение, сохраняя область NVS с настройками автомобиля. **Не выбирай полное стирание памяти**, если не собираешься сбросить настройки и калибровки контроллера.
 
-The first release entry is maintained in [webflasher/releases.json](webflasher/releases.json). Add new release tags there when publishing later candidates.
+## Сборка из исходников
 
-## Release build
+- Контроллер: проект ESP-IDF в каталоге [controller](controller/).
+- Пульты: проекты PlatformIO в каталогах [T-Display](button%20pult%20t-display/) и [2″ ST7789](buttonpult%202%20inch/).
+- GitHub Actions собирает образы всех поддерживаемых устройств и обновляет файлы для веб-флешера.
 
-See [the release workflow](.github/workflows/release-candidate.yml). It creates a GitHub prerelease for every v*-rc* tag after all three firmware images build successfully.
+## Структура репозитория
+
+- [controller/main.c](controller/main.c) — прошивка контроллера.
+- [button pult t-display/main.cpp](button%20pult%20t-display/main.cpp) — прошивка T-Display.
+- [buttonpult 2 inch/main.cpp](buttonpult%202%20inch/main.cpp) — прошивка 2″ ST7789.
+- [docs/wiring.svg](docs/wiring.svg) и [docs/wiring.md](docs/wiring.md) — схема и инструкция подключения.
+- [webflasher](webflasher/) — веб-флешер и прошивки для него.
+- [.github/workflows/release-candidate.yml](.github/workflows/release-candidate.yml) — сборка firmware и обновление зеркала образов.
+
+## Ограничения по подключению
+
+GPIO ESP32 — логические сигналы малой мощности. Подключай клапаны и компрессор только через соответствующие автомобильные драйверы или реле с защитой от выбросов и предохранителями. Не подключай индуктивную нагрузку напрямую к плате.
+
+Сигнал датчика подавай на ADC через предусмотренный входной делитель. Не подавай 5 В непосредственно на GPIO ESP32. Для датчиков и контроллера используй подходящий стабилизированный источник и общую сигнальную землю. Подробности и предупреждения — в [инструкции по подключению](docs/wiring.md).
