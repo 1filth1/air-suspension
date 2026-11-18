@@ -1,5 +1,7 @@
 # Web Flasher
 
+Run the live flasher at https://1filth1.github.io/air-suspension/webflasher/.
+
 The page uses Espressif's esptool-js and the browser Web Serial API. It accepts the sparse Intel HEX asset for the selected release and board.
 
 Run locally from this directory:
@@ -8,7 +10,7 @@ Run locally from this directory:
 
 Then open http://localhost:8000 in a current Chrome or Edge browser. Web Serial also requires a secure context, so use localhost or HTTPS.
 
-The repository is private, so release assets require GitHub sign-in. Open the release page, download the exact HEX file named under the selected device, return to the flasher, select that file and connect the board over USB.
+Firmware releases are publicly available on GitHub. Open the release page, download the exact HEX file named under the selected device, return to the flasher, select that file and connect the board over USB.
 
 The release list is in releases.json. Add a new entry after creating each prerelease. This page compares the selected filename with the selected device's expected asset before enabling Flash.
 
