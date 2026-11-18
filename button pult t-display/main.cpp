@@ -67,6 +67,8 @@ struct SettingsFrame {
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
   uint32_t check;
 } __attribute__((packed));
+struct SettingsAckFrame { uint8_t marker, opcode, status; uint32_t generation; } __attribute__((packed));
+static_assert(sizeof(SettingsAckFrame) == 7, "Settings ack layout changed");
 static_assert(sizeof(SettingsFrame) == 75, "Settings frame layout changed");
 uint32_t checkBytes(const uint8_t *bytes, size_t length) {
   uint32_t value = 0x6D2B79F5UL;
@@ -372,7 +374,13 @@ PressurePacket receivedPressure = {};
 volatile bool telemetryPending = false;
 SettingsFrame receivedSettings = {};
 volatile bool settingsFramePending = false;
+SettingsAckFrame receivedSettingsAck = {};
+volatile bool settingsAckFramePending = false;
 SettingsFrame controllerSettings = {};
+enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT };
+SettingsSaveState settingsSaveState = SETTINGS_SAVE_IDLE;
+uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
+bool settingsSavePending = false;
 bool controllerSettingsLoaded = false;
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
 const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
@@ -1024,11 +1032,20 @@ void drawEditorWheel(uint8_t index, bool selected) {
   gfx->setCursor(285 - w, y + 6); gfx->print(s);
 }
 
+const char *settingsSaveMessage() {
+  if ((int32_t)(settingsSaveUntilMs - millis()) <= 0) return nullptr;
+  if (settingsSaveState == SETTINGS_SAVE_SAVED) return "SAVED TO MAIN";
+  if (settingsSaveState == SETTINGS_SAVE_FAILED) return "SAVE FAILED";
+  if (settingsSaveState == SETTINGS_SAVE_TIMEOUT) return "SAVE NO REPLY";
+  return nullptr;
+}
+
 void editor() {
   top("EDIT PRESET");
   drawEditorHeader();
   for (uint8_t i = 0; i < 4; ++i) drawEditorWheel(i, i == editWheel);
-  foot(controllerSettingsLoaded ? "UP/DN value  OK next wheel  BACK menu" : "WAIT FOR CONTROLLER SETTINGS");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : (controllerSettingsLoaded ? "UP/DN value  OK next wheel  BACK menu" : "WAIT FOR CONTROLLER SETTINGS"));
 }
 
 void drawCalibrationSensor(uint8_t index, bool selected) {
@@ -1066,7 +1083,8 @@ void compressorMenu() {
   top("COMPRESSOR");
   drawCompressorValue(0, compressorRow == 0);
   drawCompressorValue(1, compressorRow == 1);
-  foot("UP/DN value  OK row  BACK menu");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : "UP/DN value  OK row  BACK menu");
 }
 
 void saveCompressorThreshold(uint8_t) { sendSettingsUpdate(); }
@@ -1086,6 +1104,8 @@ void sendSettingsUpdate() {
   const uint32_t checksum = checkBytes(packet, 46);
   memcpy(&packet[46], &checksum, sizeof(checksum));
   sendCommand(packet, sizeof(packet));
+  settingsSavePending = true;
+  settingsSaveDeadlineMs = millis() + 1500U;
 }
 
 void applyControllerSettings() {
@@ -1104,6 +1124,37 @@ void applyControllerSettings() {
   controllerSettingsLoaded = true;
   if (page == 4) editor();
   else if (page == 10) compressorMenu();
+}
+
+void serviceSettingsSaveFeedback() {
+  bool redraw = false;
+  if (settingsAckFramePending) {
+    SettingsAckFrame ack;
+    noInterrupts();
+    memcpy(&ack, &receivedSettingsAck, sizeof(ack));
+    settingsAckFramePending = false;
+    interrupts();
+    if (ack.marker == 0xA3 && ack.opcode == 0x43) {
+      settingsSavePending = false;
+      settingsSaveState = ack.status ? SETTINGS_SAVE_SAVED : SETTINGS_SAVE_FAILED;
+      settingsSaveUntilMs = millis() + 1400U;
+      redraw = true;
+    }
+  }
+  const uint32_t now = millis();
+  if (settingsSavePending && (int32_t)(now - settingsSaveDeadlineMs) >= 0) {
+    settingsSavePending = false;
+    settingsSaveState = SETTINGS_SAVE_TIMEOUT;
+    settingsSaveUntilMs = now + 1400U;
+    redraw = true;
+  } else if (settingsSaveState != SETTINGS_SAVE_IDLE && (int32_t)(now - settingsSaveUntilMs) >= 0) {
+    settingsSaveState = SETTINGS_SAVE_IDLE;
+    redraw = true;
+  }
+  if (redraw) {
+    if (page == 10) compressorMenu();
+    else if (page == 4) editor();
+  }
 }
 
 void transitionTo(uint8_t newPage, uint8_t newCursor) {
@@ -1302,6 +1353,12 @@ void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
   }
 
   if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
+  if (len == (int)sizeof(SettingsAckFrame) && data[0] == 0xA3 && data[1] == 0x43) {
+    memcpy(&receivedSettingsAck, data, sizeof(receivedSettingsAck));
+    settingsAckFramePending = true;
+    lastControllerPacketMs = millis();
+    return;
+  }
   if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
     memcpy(&receivedSettings, data, sizeof(receivedSettings));
     settingsFramePending = true;
@@ -1387,6 +1444,7 @@ void serviceEspNow() {
     esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&heartbeat), sizeof(heartbeat));
   }
   applyControllerSettings();
+  serviceSettingsSaveFeedback();
   if (telemetryPending) {
     noInterrupts();
     PressurePacket packet = receivedPressure;
