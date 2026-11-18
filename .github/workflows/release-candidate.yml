@@ -103,12 +103,9 @@ jobs:
         run: |
           TAG="$(python -c 'import json; print(json.load(open("webflasher/releases.json"))["releases"][0]["tag"])')"
           DEST="webflasher/firmware/$TAG"
-          if [ "$(find "$DEST" -maxdepth 1 -name '*.hex' 2>/dev/null | wc -l)" -ge 3 ]; then
-            echo "All firmware files for $TAG are already mirrored."
-            exit 0
-          fi
           mkdir -p "$DEST"
-          cp release-assets/*.hex "$DEST/"
+          # Always replace existing images so each firmware build reaches the flasher.
+          cp -f release-assets/*.hex "$DEST/"
       - name: Commit mirrored firmware
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
