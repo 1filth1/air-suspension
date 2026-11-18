@@ -77,17 +77,14 @@ async function loadFirmware(release, deviceId) {
   const token = ++loadToken;
   const device = devices[deviceId];
   const asset = release.assets?.[deviceId] || device.asset;
-  const assetId = release.assetIds?.[deviceId];
-  if (!assetId) {
-    $("assetName").textContent = "Для этого файла нет Asset ID в каталоге.";
-    say("Не удалось определить файл прошивки для выбранного релиза.");
-    return;
-  }
-  const url = "https://api.github.com/repos/1filth1/air-suspension/releases/assets/" + assetId;
+  const url = new URL(
+    "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
+    document.baseURI
+  );
   $("assetName").textContent = "Скачиваю " + asset + "…";
   flashButton.disabled = true;
   try {
-    const response = await fetch(url, { headers: { Accept: "application/octet-stream" } });
+    const response = await fetch(url);
     if (!response.ok) throw new Error("GitHub вернул HTTP " + response.status);
     const text = await response.text();
     if (token !== loadToken) return;
