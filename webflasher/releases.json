@@ -8,6 +8,11 @@
         "controller": "air-suspension-controller.hex",
         "t-display": "air-suspension-remote-t-display.hex",
         "remote-2inch": "air-suspension-remote-2inch.hex"
+      },
+      "assetIds": {
+        "controller": 762006738,
+        "remote-2inch": 762006739,
+        "t-display": 762006737
       }
     }
   ]
