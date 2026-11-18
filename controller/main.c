@@ -47,7 +47,8 @@ typedef struct __attribute__((packed)) {
   uint32_t check;
 } SettingsFrame;
 typedef struct __attribute__((packed)) { uint8_t marker,opcode,status; uint32_t generation; } AckFrame;
-typedef struct { uint8_t len; uint8_t data[32]; } Command;
+#define COMMAND_MAX_SIZE 50
+typedef struct { uint8_t len; uint8_t data[COMMAND_MAX_SIZE]; } Command;
 
 static const gpio_num_t fill[4]={GPIO_NUM_4,GPIO_NUM_14,GPIO_NUM_17,GPIO_NUM_19};
 static const gpio_num_t dump[4]={GPIO_NUM_13,GPIO_NUM_16,GPIO_NUM_18,GPIO_NUM_21};
@@ -188,7 +189,7 @@ static void rx(const esp_now_recv_info_t *info,const uint8_t *data,int len){
   if(len==2&&data[0]==0xE1&&data[1]==2&&peer&&encrypted&&!memcmp(peerMac,info->src_addr,6)){
     if(!linked){linked=true;settingsPending=true;}lastBeat=now();teleNow=true;return;
   }
-  if(!linked||!peer||!encrypted||memcmp(peerMac,info->src_addr,6)||data[0]!=0xB1||len>32)return;
+  if(!linked||!peer||!encrypted||memcmp(peerMac,info->src_addr,6)||data[0]!=0xB1||len>COMMAND_MAX_SIZE)return;
   lastBeat=now();
   if(len==2&&data[0]==0xB1&&data[1]==0x43){sendCalibrationState();return;}
   Command c={.len=(uint8_t)len};memcpy(c.data,data,(size_t)len);
