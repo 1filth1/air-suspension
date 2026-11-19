@@ -373,6 +373,7 @@ Preferences prefs;
 uint8_t controllerMac[6] = {0,0,0,0,0,0};
 bool controllerPeerKnown = false;
 uint32_t lastControllerPacketMs = 0;
+uint32_t lastSettingsRequestMs = 0;
 uint32_t lastDiscoveryMs = 0;
 PressurePacket receivedPressure = {};
 volatile bool telemetryPending = false;
@@ -1494,6 +1495,14 @@ void serviceEspNow() {
     esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&heartbeat), sizeof(heartbeat));
   }
   applyControllerSettings();
+  // The controller is authoritative for preset names and targets. If its first
+  // settings frame was lost or rejected, explicitly request another copy until
+  // a valid frame has been applied.
+  if (fresh && !controllerSettingsLoaded && now - lastSettingsRequestMs >= 750U) {
+    const uint8_t request[] = {0xB1, 0x42};
+    sendCommand(request, sizeof(request));
+    lastSettingsRequestMs = now;
+  }
   serviceSettingsSaveFeedback();
   if (telemetryPending) {
     noInterrupts();
