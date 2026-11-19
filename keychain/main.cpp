@@ -4,16 +4,14 @@
 // Display shows the tank pressure and all four wheel pressures; four buttons
 // raise or lower the front and the rear axle.
 //
-// The remote speaks only the part of the controller protocol that is identical
-// in the v2 (main) and v3 (release candidate) controller configs, so it works
-// with either firmware:
+// Controller protocol:
 //   E1 01 / E1 81 / E1 02   discovery, encrypted-peer handshake, heartbeat
 //   A1 + float[5] + flags   telemetry, 250 ms
-//   B1 20..27               manual pulse for one wheel: fill/dump
-//   B1 30..33               cancel the manual pulse on one wheel
-//   B1 2F                   stop every valve and the compressor
-// The settings frames (0xA2 / 0xA3 / 0x43 / 0x44 / 0x45) are deliberately not
-// used: they differ between v2 and v3, and this remote does not need them.
+//   A2 SettingsFrame v2    controller-owned preset names and four wheel targets
+//   B1 42                  request settings; B1 44 + preset activates a preset
+//   B1 20..27 / 30..33      manual wheel fill/dump and cancel
+// Preset editing remains on the full-size remotes; this compact remote only
+// selects and activates the controller's saved presets.
 //
 // Safety model, inherited from the controller:
 //   - A manual pulse expires in the controller after manualTimeoutMs (2 s by
@@ -515,7 +513,6 @@ static void handleButtons(uint32_t now) {
   if (pressedEdge) selectPressedAt = now;
   const bool confirmPressed = buttonStable[1];
   const bool confirmEdge = confirmPressed && !confirmWasPressed;
-  const bool confirmRelease = !confirmPressed && confirmWasPressed;
   confirmWasPressed = confirmPressed;
 
   // A held button is activity: never time out during a manual command.
@@ -525,6 +522,7 @@ static void handleButtons(uint32_t now) {
   if (!manualMode && selectPressed && buttonRaw[0] &&
       now - selectPressedAt >= MANUAL_HOLD_MS) {
     manualMode = true;
+    selectPressedAt = 0;
     selection = 0; // Start with front-left fill.
     lastButtonActivityAt = now;
     waitForRelease = true; // Confirmation must be released after entry.
