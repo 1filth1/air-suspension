@@ -112,7 +112,7 @@ jobs:
   mirror-webflasher-firmware:
     name: Mirror firmware for the web flasher
     if: github.event_name == 'pull_request'
-    needs: [controller, remotes]
+    needs: [controller, remotes, keychain]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
