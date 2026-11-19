@@ -2,7 +2,7 @@
 
 ESP32-система управления пневмоподвеской: контроллер измеряет давление, управляет клапанами и компрессором, а настройки изменяются с беспроводного пульта.
 
-**[Открыть веб-флешер](https://1filth1.github.io/air-suspension/webflasher/)** · [Все релизы](https://github.com/1filth1/air-suspension/releases)
+**[Открыть веб-флешер](https://1filth1.github.io/air-suspension/webflasher/?v=rc4)** · [Все релизы](https://github.com/1filth1/air-suspension/releases)
 
 > Проект находится в стадии release candidate. Перед подключением пневматических исполнительных механизмов проверьте распиновку, логику выходов и аварийное отключение на стенде.
 
@@ -61,7 +61,7 @@ ESP32-система управления пневмоподвеской: кон
 
 ## Прошивка
 
-Открой [веб-флешер](https://1filth1.github.io/air-suspension/webflasher/) в Chrome или Edge:
+Открой [веб-флешер](https://1filth1.github.io/air-suspension/webflasher/?v=rc4) в Chrome или Edge:
 
 1. Выбери релиз и тип платы.
 2. Подключи устройство к компьютеру по USB и выбери его в браузере.
