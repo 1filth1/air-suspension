@@ -1,5 +1,12 @@
 # Air Suspension — Release notes
 
+## Unreleased
+
+### Added
+- Added keychain preset selection with short SELECT clicks and preset activation with a short CONFIRM click; holding SELECT still enters manual wheel control.
+- The keychain sends the controller's existing `B1 44` preset command and never stores or edits preset targets locally.
+
+
 ## v0.1.0-rc.4
 
 ### Fixed
