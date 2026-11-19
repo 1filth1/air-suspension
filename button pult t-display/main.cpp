@@ -386,6 +386,7 @@ SettingsSaveState settingsSaveState = SETTINGS_SAVE_IDLE;
 uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
 bool settingsSavePending = false;
 bool controllerSettingsLoaded = false;
+uint32_t lastSettingsRequestMs = 0;
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
 char preset[3][13] = {"PARK", "DRIVE", "LIFT"};
 float pressure[5] = {NAN,NAN,NAN,NAN,NAN};
@@ -1160,6 +1161,11 @@ void applyControllerSettings() {
   interrupts();
   if (snapshot.marker != 0xA2 || snapshot.version != 2 ||
       snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
+  // Reject malformed names before they reach the UI; the controller owns this data.
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (snapshot.presetNames[i][12] != '\0' ||
+        strnlen(snapshot.presetNames[i], 12) == 0) return;
+  }
   controllerSettings = snapshot;
   memcpy(target, snapshot.presetDbar, sizeof(target));
   memcpy(preset,snapshot.presetNames,sizeof(preset));
@@ -1473,6 +1479,7 @@ void serviceEspNow() {
       controllerPeerKnown = false;
       discoveryConfirmPending = false;
       controllerSettingsLoaded = false;
+      lastSettingsRequestMs = 0;
       memset(controllerMac, 0, sizeof(controllerMac));
       lastControllerPacketMs = 0;
       // Do not wait for the normal 500 ms discovery period after a controller
@@ -1492,6 +1499,15 @@ void serviceEspNow() {
     lastDiscoveryMs = now;
     const EspNowDiscoveryPacket heartbeat = {0xE1, 0x02};
     esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&heartbeat), sizeof(heartbeat));
+  }
+  // The controller sends settings immediately after pairing, but ESP-NOW is
+  // best-effort. Request them repeatedly until a complete, checksummed frame
+  // is accepted; this also recovers if the first packet was lost.
+  if (fresh && !controllerSettingsLoaded &&
+      (lastSettingsRequestMs == 0 || now - lastSettingsRequestMs >= 750U)) {
+    const uint8_t request[] = {0xB1, 0x42};
+    sendCommand(request, sizeof(request));
+    lastSettingsRequestMs = now;
   }
   applyControllerSettings();
   serviceSettingsSaveFeedback();
