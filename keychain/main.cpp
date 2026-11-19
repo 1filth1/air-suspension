@@ -122,6 +122,7 @@ public:
     window(x, y, x, y);
     cmd(0x2C);
     dcHigh();
+    digitalWrite(LCD_CS, LOW);  // Keep the panel selected while sending pixels.
     spi.write16(color);
     csHigh();
   }
@@ -137,6 +138,7 @@ public:
     window(x, y, x + w - 1, y + h - 1);
     cmd(0x2C);
     dcHigh();
+    digitalWrite(LCD_CS, LOW);  // Keep the panel selected while sending pixels.
 
     // 32 pixels per transfer keeps the stack small and the bus busy.
     uint8_t block[64];
