@@ -46,12 +46,9 @@
 #define LCD_RST 23
 #define LCD_BL 4
 
-// Four buttons wired to GND, internal pull-ups. These pins are free on the
-// T-Display and are all in the RTC domain, so they can wake the chip later.
-#define BTN_FRONT_UP 32
-#define BTN_FRONT_DOWN 33
-#define BTN_REAR_UP 25
-#define BTN_REAR_DOWN 26
+// Built-in active-low buttons. GPIO35 uses the onboard pull-up.
+#define BTN_SELECT 0
+#define BTN_CONFIRM 35
 
 // The battery divider is powered from a GPIO to keep the drain at zero.
 // Set KEYCHAIN_BATTERY 0 if the revision you have has no divider.
@@ -218,22 +215,20 @@ const int16_t HEADER_Y = 5;
 const int16_t LINK_X = 128, LINK_Y = 9, LINK_R = 4;
 
 // Tank card.
-const int16_t TANK_X = 3, TANK_Y = 21, TANK_W = 129, TANK_H = 47;
+const int16_t TANK_X = 3, TANK_Y = 21, TANK_W = 129, TANK_H = 59;
 const int16_t TANK_LABEL_X = 9, TANK_LABEL_Y = 25;
-const int16_t TANK_VALUE_X = 9, TANK_VALUE_Y = 34;
-const int16_t TANK_GAUGE_X = 9, TANK_GAUGE_Y = 61, TANK_GAUGE_W = 117, TANK_GAUGE_H = 4;
+const int16_t TANK_VALUE_X = 9, TANK_VALUE_Y = 40;
+const int16_t TANK_GAUGE_X = 9, TANK_GAUGE_Y = 71, TANK_GAUGE_W = 117, TANK_GAUGE_H = 4;
 
 // Wheel cards: 2 columns, 2 rows.
 const int16_t WHEEL_X[2] = {3, 69};
-const int16_t WHEEL_Y[2] = {71, 131};
-const int16_t WHEEL_W = 63, WHEEL_H = 57;
-const int16_t WHEEL_LABEL_DX = 7, WHEEL_LABEL_DY = 5;
-const int16_t WHEEL_VALUE_DX = 7, WHEEL_VALUE_DY = 17;
-const int16_t WHEEL_GAUGE_DX = 7, WHEEL_GAUGE_DY = 45;
+const int16_t WHEEL_Y[2] = {84, 151};
+const int16_t WHEEL_W = 63, WHEEL_H = 64;
+const int16_t WHEEL_LABEL_DX = 7, WHEEL_LABEL_DY = 8;
+const int16_t WHEEL_VALUE_DX = 7, WHEEL_VALUE_DY = 23;
+const int16_t WHEEL_GAUGE_DX = 7, WHEEL_GAUGE_DY = 53;
 const int16_t WHEEL_GAUGE_W = 49, WHEEL_GAUGE_H = 5;
 
-// Button strip.
-const int16_t BUTTON_Y = 194, BUTTON_W = 30, BUTTON_H = 41, BUTTON_GAP = 3;
 }  // namespace layout
 
 /* ------------------------------------------------------------------------- */
@@ -430,27 +425,25 @@ static void setupEspNow() {
 /* Buttons                                                                   */
 /* ------------------------------------------------------------------------- */
 
-static const uint8_t kButtonPins[4] = {BTN_FRONT_UP, BTN_FRONT_DOWN, BTN_REAR_UP,
-                                       BTN_REAR_DOWN};
+static const uint8_t kButtonPins[2] = {BTN_SELECT, BTN_CONFIRM};
 static const uint32_t DEBOUNCE_MS = 25;
 static const uint32_t REPEAT_INTERVAL_MS = 180;
-
-static bool buttonRaw[4] = {false, false, false, false};
-static bool buttonStable[4] = {false, false, false, false};
-static uint32_t buttonRawAt[4] = {0, 0, 0, 0};
-
-struct AxisState {
-  bool up = false, down = false;
-  uint32_t upAt = 0, downAt = 0;
-  int8_t sent = 0;  // 0 idle, +1 filling, -1 dumping
-  uint32_t sentAt = 0;
-  bool waitForRelease = true;
-};
-static AxisState axes[2];
+static bool buttonRaw[2] = {};
+static bool buttonStable[2] = {};
+static uint32_t buttonRawAt[2] = {};
+static int8_t selection = -1; // First selection press: FL fill; eight states.
+static int8_t activeSelection = -1;
+static bool waitForRelease = true;
+static uint32_t sentAt = 0;
+static bool manualMode = false;
+static uint32_t selectPressedAt = 0;
+static uint32_t lastButtonActivityAt = 0;
+static const uint32_t MANUAL_HOLD_MS = 2000;
+static const uint32_t MANUAL_IDLE_MS = 2000;
 
 static void pollButtons(uint32_t now) {
-  for (uint8_t i = 0; i < 4; i++) {
-    const bool raw = digitalRead(kButtonPins[i]) == LOW;
+  for (uint8_t i = 0; i < 2; ++i) {
+    bool raw = digitalRead(kButtonPins[i]) == LOW;
     if (raw != buttonRaw[i]) {
       buttonRaw[i] = raw;
       buttonRawAt[i] = now;
@@ -460,70 +453,67 @@ static void pollButtons(uint32_t now) {
   }
 }
 
-static void pumpAxis(uint8_t axis, bool fill) {
-  sendManual(axis * 2, fill);
-  sendManual(axis * 2 + 1, fill);
-}
-
-static void cancelAxis(uint8_t axis) {
-  sendCancel(axis * 2);
-  sendCancel(axis * 2 + 1);
-}
-
-// A lost link must not leave an axis "sent": once the controller is back the
-// user has to press again.
 static void invalidateAxes() {
-  for (uint8_t i = 0; i < 2; i++) {
-    axes[i].sent = 0;
-    axes[i].waitForRelease = true;
-  }
+  activeSelection = -1;
+  waitForRelease = true;
 }
 
 static void handleButtons(uint32_t now) {
-  for (uint8_t i = 0; i < 2; i++) {
-    AxisState &axis = axes[i];
-    const bool up = buttonStable[i * 2];
-    const bool down = buttonStable[i * 2 + 1];
+  static bool selectWasPressed = false;
+  const bool selectPressed = buttonStable[0];
+  const bool pressedEdge = selectPressed && !selectWasPressed;
+  selectWasPressed = selectPressed;
+  if (pressedEdge) selectPressedAt = now;
 
-    if (up && !axis.up) axis.upAt = now;
-    if (down && !axis.down) axis.downAt = now;
-    axis.up = up;
-    axis.down = down;
+  // A held button is activity: never time out during a manual command.
+  if (buttonRaw[0] || buttonRaw[1] || buttonStable[0] || buttonStable[1])
+    lastButtonActivityAt = now;
 
-    if (axis.waitForRelease) {
-      if (!up && !down) axis.waitForRelease = false;
-      axis.sent = 0;
-      continue;
-    }
+  if (!manualMode && selectPressed && buttonRaw[0] &&
+      now - selectPressedAt >= MANUAL_HOLD_MS) {
+    manualMode = true;
+    selection = 0; // Start with front-left fill.
+    lastButtonActivityAt = now;
+    waitForRelease = true; // Confirmation must be released after entry.
+  } else if (manualMode && pressedEdge) {
+    if (activeSelection >= 0) sendCancel(activeSelection / 2);
+    activeSelection = -1;
+    selection = (selection + 1) % 8;
+    if (buttonStable[1] || buttonRaw[1]) waitForRelease = true;
+  }
 
-    int8_t desired = 0;
-    if (up && down) {
-      // Both buttons of one axle held: the one pressed last wins.
-      desired = (int32_t)(axis.upAt - axis.downAt) > 0 ? 1 : -1;
-    } else if (up) {
-      desired = 1;
-    } else if (down) {
-      desired = -1;
-    }
-
-    if (desired > 0 && !tankValid()) desired = 0;
-
-    if (desired != axis.sent) {
-      if (desired == 0) {
-        cancelAxis(i);
-      } else {
-        pumpAxis(i, desired > 0);
-      }
-      axis.sent = desired;
-      axis.sentAt = now;
-      continue;
-    }
-
-    // Refresh the controller's 2 s manual timeout while the button is held.
-    if (desired != 0 && now - axis.sentAt >= REPEAT_INTERVAL_MS) {
-      pumpAxis(i, desired > 0);
-      axis.sentAt = now;
-    }
+  if (manualMode && now - lastButtonActivityAt >= MANUAL_IDLE_MS) {
+    if (activeSelection >= 0) sendCancel(activeSelection / 2);
+    manualMode = false;
+    selection = -1;
+    invalidateAxes();
+  }
+  if (!manualMode) return;
+  if (!linked || !telemetryFresh()) {
+    if (activeSelection >= 0) sendCancel(activeSelection / 2);
+    invalidateAxes();
+    return;
+  }
+  if (waitForRelease) {
+    if (!buttonRaw[1] && !buttonStable[1]) waitForRelease = false;
+    return;
+  }
+  // LOCK is a compressor lockout, not a manual-valve prohibition.
+  // SENS is aggregate: a fault on another wheel must not disable this one.
+  // Mirror the controller manualStart checks; its pressure limits remain authoritative.
+  bool allowed = selection >= 0 && buttonStable[1] && buttonRaw[1] &&
+                 barValid(wheelBar(selection / 2)) &&
+                 ((selection & 1) || tankValid());
+  if (!allowed) {
+    if (activeSelection >= 0) sendCancel(activeSelection / 2);
+    activeSelection = -1;
+    return;
+  }
+  if (activeSelection != selection || now - sentAt >= REPEAT_INTERVAL_MS) {
+    sendManual(selection / 2, !(selection & 1));
+    activeSelection = linked ? selection : -1;
+    sentAt = now;
+    if (!linked) waitForRelease = true;
   }
 }
 
@@ -536,7 +526,6 @@ static char shownWheel[4][8] = {"", "", "", ""};
 static char shownBattery[6] = "";
 static char shownStatus[6] = "";
 static int8_t shownLink = -1;
-static uint8_t shownPressed = 0;
 
 static void drawText(int16_t x, int16_t y, const char *text, uint16_t fg,
                      uint16_t bg, uint8_t size) {
@@ -680,39 +669,6 @@ static void drawWheelGauge(uint8_t wheel, bool force) {
             layout::WHEEL_GAUGE_W, layout::WHEEL_GAUGE_H, fraction, MINT);
 }
 
-static void drawButtonPill(uint8_t index, bool pressed) {
-  const int16_t x = 2 + index * (layout::BUTTON_W + layout::BUTTON_GAP);
-  const int16_t y = layout::BUTTON_Y;
-  const int16_t cx = x + layout::BUTTON_W / 2;
-  const uint16_t fill = pressed ? ORANGE : SURFACE;
-  const uint16_t ink = pressed ? BG : MINT;
-
-  gfx.fillRoundRect(x, y, layout::BUTTON_W, layout::BUTTON_H, 8, fill);
-  if (!pressed) {
-    gfx.drawRoundRect(x, y, layout::BUTTON_W, layout::BUTTON_H, 8, SUB);
-  }
-  const char *letter = index < 2 ? "F" : "R";
-  drawText(cx - 6, y + 5, letter, ink, fill, 2);
-  // Arrow: up for the first button of an axle, down for the second.
-  if ((index & 1) == 0) {
-    gfx.fillTriangle(cx, y + 24, cx - 7, y + 35, cx + 7, y + 35, ink);
-  } else {
-    gfx.fillTriangle(cx, y + 35, cx - 7, y + 24, cx + 7, y + 24, ink);
-  }
-}
-
-static void drawButtons(bool force) {
-  uint8_t pressed = 0;
-  for (uint8_t i = 0; i < 4; i++) {
-    if (buttonStable[i] && !axes[i >> 1].waitForRelease) pressed |= 1U << i;
-  }
-  if (!force && pressed == shownPressed) return;
-  shownPressed = pressed;
-  for (uint8_t i = 0; i < 4; i++) {
-    drawButtonPill(i, (pressed >> i) & 1U);
-  }
-}
-
 static void drawStaticFrame() {
   gfx.fillScreen(BG);
 
@@ -734,7 +690,25 @@ static void drawStaticFrame() {
              SUB, SURFACE, 1);
   }
 
-  for (uint8_t i = 0; i < 4; i++) drawButtonPill(i, false);
+}
+
+static void drawSelection(bool force) {
+  static int8_t shown = -2;
+  static bool shownOn = false;
+  bool on = activeSelection < 0 || ((millis() / 250) % 2 == 0);
+  if (!force && shown == selection && shownOn == on) return;
+  for (uint8_t wheel = 0; wheel < 4; ++wheel) {
+    uint16_t color = SURFACE;
+    if (selection >= 0 && wheel == selection / 2 && on)
+      color = (selection & 1) ? RED : 0x001F;
+    for (int16_t inset = 0; inset < 2; ++inset)
+      gfx.drawRoundRect(layout::WHEEL_X[wheel & 1] + inset,
+                        layout::WHEEL_Y[wheel >> 1] + inset,
+                        layout::WHEEL_W - inset * 2,
+                        layout::WHEEL_H - inset * 2, 8 - inset, color);
+  }
+  shown = selection;
+  shownOn = on;
 }
 
 static void render(bool full) {
@@ -743,7 +717,6 @@ static void render(bool full) {
     for (uint8_t i = 0; i < 4; i++) shownWheel[i][0] = '\0';
     shownStatus[0] = '\0';
     shownBattery[0] = '\0';
-    shownPressed = 0xFF;
     shownLink = -1;
     drawStaticFrame();
   }
@@ -755,7 +728,13 @@ static void render(bool full) {
     drawWheelValue(wheel, full);
     drawWheelGauge(wheel, full);
   }
-  drawButtons(full);
+  drawSelection(full);
+  static int8_t shownManual = -1;
+  if (full || shownManual != (int8_t)manualMode) {
+    gfx.fillRect(0, 218, 135, 22, BG);
+    if (manualMode) drawText(31, 222, "manual", MINT, BG, 2);
+    shownManual = manualMode;
+  }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -765,7 +744,8 @@ static void render(bool full) {
 void setup() {
   Serial.begin(115200);
 
-  for (uint8_t i = 0; i < 4; i++) pinMode(kButtonPins[i], INPUT_PULLUP);
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_CONFIRM, INPUT);
 #if KEYCHAIN_BATTERY
   pinMode(BATTERY_EN, OUTPUT);
   digitalWrite(BATTERY_EN, LOW);
@@ -786,8 +766,7 @@ void setup() {
 
   // Nothing is sent until a controller answers discovery, so a fresh remote
   // never opens a valve on its own.
-  axes[0].waitForRelease = true;
-  axes[1].waitForRelease = true;
+  waitForRelease = true;
 }
 
 void loop() {
