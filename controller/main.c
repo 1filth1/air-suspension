@@ -79,6 +79,7 @@ typedef struct __attribute__((packed)) {
 static uint16_t calBar10[5]={0,0,0,0,0};
 static uint8_t calValidMask=0;
 static char presetNames[3][13]={{"PARK"},{"DRIVE"},{"LIFT"}};
+static uint32_t checkBytes(const uint8_t *b,size_t len);
 typedef struct __attribute__((packed)){char names[3][13];uint32_t check;} PresetNameStore;
 static uint32_t nameStoreCheck(const PresetNameStore *s){return checkBytes((const uint8_t*)s,offsetof(PresetNameStore,check));}
 static bool validPresetName(const char *s){bool any=false;for(uint8_t i=0;i<12;i++){unsigned char ch=(unsigned char)s[i];if(ch==0)break;if(ch<32||ch>126)return false;if(ch!=' ')any=true;}return any;}
