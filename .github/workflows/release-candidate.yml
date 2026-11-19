@@ -6,6 +6,7 @@ on:
       - "controller/**"
       - "button pult t-display/**"
       - "buttonpult 2 inch/**"
+      - "keychain/**"
       - ".github/workflows/release-candidate.yml"
       - "webflasher/releases.json"
   push:
@@ -67,10 +68,34 @@ jobs:
           path: dist/*.hex
           if-no-files-found: error
 
+  keychain:
+    name: Build keychain remote firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio==6.1.16 esptool==4.8.1
+      - name: Build keychain remote and export Intel HEX
+        working-directory: keychain
+        run: |
+          pio run -e keychain
+          mkdir -p ../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32 merge_bin --format hex -o ../dist/air-suspension-keychain.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/keychain/bootloader.bin 0x8000 .pio/build/keychain/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/keychain/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keychain-hex
+          path: dist/air-suspension-keychain.hex
+          if-no-files-found: error
+
   prerelease:
     name: Publish GitHub prerelease
     if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-rc')
-    needs: [controller, remotes]
+    needs: [controller, remotes, keychain]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
