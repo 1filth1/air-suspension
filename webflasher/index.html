@@ -32,6 +32,7 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 <option value="controller">Контроллер · ESP32 DevKit V1</option>
 <option value="t-display">Пульт · ESP32-S3 T-Display</option>
 <option value="remote-2inch">Пульт · ESP32, экран 2″ ST7789</option>
+<option value="keychain">Брелок · TTGO T-Display</option>
 </select></div>
 </div>
 <div class="actions"><a id="releaseLink" class="button" target="_blank" rel="noopener">Открыть страницу релиза</a></div>
@@ -57,7 +58,8 @@ let releases = [], firmwareText = null, firmwareKey = "", loadToken = 0;
 const devices = {
   controller: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-controller.hex" },
   "t-display": { chip: "ESP32-S3", flashSize: "8MB", asset: "air-suspension-remote-t-display.hex" },
-  "remote-2inch": { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-remote-2inch.hex" }
+  "remote-2inch": { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-remote-2inch.hex" },
+  keychain: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-keychain.hex" }
 };
 function say(message) { status.textContent = message; }
 function selectedRelease() { return releases.find((item) => item.tag === releaseSelect.value); }
