@@ -32,6 +32,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -242,6 +243,26 @@ struct Telemetry {
 } __attribute__((packed));
 static_assert(sizeof(Telemetry) == 22, "telemetry layout changed");
 
+struct SettingsFrame {
+  uint8_t marker, version;
+  uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar, compressorOnDbar, targetToleranceDbar;
+  uint16_t autoTimeoutSec, compressorMaxRunSec, manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5];
+  int16_t zeroMilliVolts[5]; char presetNames[3][13]; uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
+static uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) {
+    value = (value << 5) | (value >> 27);
+    value ^= bytes[i];
+  }
+  return value;
+}
+
+
 static const uint8_t ESPNOW_CHANNEL = 1;
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Same key as the controller and the other remotes. See README: this belongs in
@@ -274,25 +295,6 @@ static bool controllerSettingsLoaded = false;
 static uint8_t selectedPreset = 0;
 static volatile bool telemetryPending = false;
 static uint32_t lastTelemetryMs = 0;
-
-struct SettingsFrame {
-  uint8_t marker, version;
-  uint32_t generation;
-  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
-  uint16_t tankLimitDbar, compressorOnDbar, targetToleranceDbar;
-  uint16_t autoTimeoutSec, compressorMaxRunSec, manualTimeoutMs;
-  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5];
-  int16_t zeroMilliVolts[5]; char presetNames[3][13]; uint32_t check;
-} __attribute__((packed));
-static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
-static uint32_t checkBytes(const uint8_t *bytes, size_t length) {
-  uint32_t value = 0x6D2B79F5UL;
-  for (size_t i = 0; i < length; ++i) {
-    value = (value << 5) | (value >> 27);
-    value ^= bytes[i];
-  }
-  return value;
-}
 
 // bar[0..3] are the wheels FL, FR, RL, RR; bar[4] is the tank.
 static float pressureBar[5] = {NAN, NAN, NAN, NAN, NAN};
@@ -508,6 +510,7 @@ static void handleButtons(uint32_t now) {
   static bool confirmWasPressed = false;
   const bool selectPressed = buttonStable[0];
   const bool pressedEdge = selectPressed && !selectWasPressed;
+  const bool selectRelease = !selectPressed && selectWasPressed;
   selectWasPressed = selectPressed;
   if (pressedEdge) selectPressedAt = now;
   const bool confirmPressed = buttonStable[1];
@@ -532,10 +535,10 @@ static void handleButtons(uint32_t now) {
     if (buttonStable[1] || buttonRaw[1]) waitForRelease = true;
   }
 
-  if (!manualMode && !selectPressed && selectWasPressed == false && !buttonRaw[0] &&
-      selectPressedAt != 0 && now - selectPressedAt < 600U) {
+  if (!manualMode && selectRelease && selectPressedAt != 0 &&
+      now - selectPressedAt < 600U) {
     // Short SELECT cycles the controller-defined presets; a long hold enters manual mode.
-    selectedPreset = (selectedPreset + 1U) % 3U;
+    if (controllerSettingsLoaded) selectedPreset = (selectedPreset + 1U) % 3U;
     selectPressedAt = 0;
   }
   if (!manualMode && confirmEdge) activateSelectedPreset();
@@ -795,10 +798,9 @@ static void render(bool full) {
     } else if (controllerSettingsLoaded) {
       char line[32];
       const uint16_t *v = controllerSettings.presetDbar[selectedPreset];
-      snprintf(line, sizeof(line), "%.12s %u.%u/%u.%u/%u.%u/%u.%u",
+      snprintf(line, sizeof(line), "%.3s %u/%u/%u/%u dbar",
         controllerSettings.presetNames[selectedPreset],
-        v[0] / 10, v[0] % 10, v[1] / 10, v[1] % 10,
-        v[2] / 10, v[2] % 10, v[3] / 10, v[3] % 10);
+        v[0], v[1], v[2], v[3]);
       drawText(1, 222, line, MINT, BG, 1);
     } else {
       drawText(14, 222, "WAIT PRESETS", ORANGE, BG, 1);
@@ -869,6 +871,8 @@ void loop() {
         memset(controllerMac, 0, sizeof(controllerMac));
       }
       lastControllerPacketMs = 0;
+      controllerSettingsLoaded = false;
+      lastSettingsRequestMs = 0;
       lastDiscoveryMs = now;
       sendDiscovery();
       invalidateAxes();
