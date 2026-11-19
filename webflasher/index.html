@@ -87,11 +87,6 @@ async function loadFirmware(release, deviceId) {
         "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
         document.baseURI
       );
-    ? new URL(asset)
-    : new URL(
-        "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
-        document.baseURI
-      );
   $("assetName").textContent = "Скачиваю " + assetLabel + "…";
   flashButton.disabled = true;
   try {
