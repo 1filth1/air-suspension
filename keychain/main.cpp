@@ -1,8 +1,8 @@
 // Air Suspension — keychain remote for the TTGO T-Display (ESP32, 1.14" IPS).
 //
 // Board: TTGO T-Display, ESP32, ST7789V 135x240 over 4-wire SPI.
-// Display shows the tank pressure and all four wheel pressures; four buttons
-// raise or lower the front and the rear axle.
+// Display shows the tank and four wheel pressures plus the selected controller preset.
+// SELECT cycles presets; CONFIRM activates one; holding SELECT enters manual mode.
 //
 // Controller protocol:
 //   E1 01 / E1 81 / E1 02   discovery, encrypted-peer handshake, heartbeat
@@ -796,7 +796,7 @@ static void render(bool full) {
     } else if (controllerSettingsLoaded) {
       char line[32];
       const uint16_t *v = controllerSettings.presetDbar[selectedPreset];
-      snprintf(line, sizeof(line), "%.3s %u/%u/%u/%u dbar",
+      snprintf(line, sizeof(line), "%.3s %u/%u/%u/%u",
         controllerSettings.presetNames[selectedPreset],
         v[0], v[1], v[2], v[3]);
       drawText(1, 222, line, MINT, BG, 1);
