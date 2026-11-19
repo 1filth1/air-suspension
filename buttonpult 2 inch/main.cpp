@@ -1,11 +1,15 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Preferences.h>
-#include <NimBLEDevice.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_now.h>
+#include <stddef.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <string.h>
 
 // ST7789, SPI display in landscape orientation: 320 x 240.
 
@@ -43,8 +47,12 @@ void render();
 void choosePreset(uint8_t p);
 void updateArrival();
 void refreshTelemetry();
-void onPressure(NimBLERemoteCharacteristic *, uint8_t *data, size_t n, bool);
-void bluetooth();
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status);
+void setupEspNow();
+void serviceEspNow();
+void applyControllerSettings();
+void sendSettingsUpdate();
 void saveTarget();
 void press(Button b);
 void buttons();
@@ -68,9 +76,26 @@ static const uint8_t BTN_IN = 32;
 static const uint8_t BTN_OUT = 33;
 static const uint8_t BTN_PRESET = 17;
 
-static const char *SERVICE_UUID  = "a7b10000-7e5d-4a4c-9f09-8a0b01d40001";
-static const char *PRESSURE_UUID = "a7b10001-7e5d-4a4c-9f09-8a0b01d40001";
-static const char *COMMAND_UUID  = "a7b10002-7e5d-4a4c-9f09-8a0b01d40001";
+constexpr uint8_t ESPNOW_CHANNEL = 1;
+static const uint8_t ESPNOW_KEY[16] = {0x41,0x69,0x72,0x52,0x69,0x64,0x65,0x2D,0x32,0x30,0x32,0x36,0x2D,0x4B,0x31,0x21};
+static const uint8_t ESPNOW_BROADCAST[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+constexpr uint32_t CONTROLLER_TIMEOUT_MS = 1200;
+constexpr uint32_t DISCOVERY_INTERVAL_MS = 500;
+struct SettingsFrame {
+  uint8_t marker,version; uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar; uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
+  uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
+  uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
+uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) { value = (value << 5) | (value >> 27); value ^= bytes[i]; }
+  return value;
+}
 
 
 
@@ -83,12 +108,15 @@ static const uint16_t ORANGE = 0xFD20, GREEN = 0x54AC, RED = 0xF800, LIME = 0xBF
 
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, -1); // RESET is tied to the TFT board reset circuit.
 Preferences prefs;
-NimBLEClient *client = nullptr;
-NimBLERemoteCharacteristic *commandChar = nullptr;
-NimBLEAddress pendingAddress;
+uint8_t controllerMac[6] = {};
+bool controllerPeerKnown = false;
+uint32_t lastControllerPacketMs = 0, lastDiscoveryMs = 0;
+SettingsFrame receivedSettings = {}, controllerSettings = {};
+volatile bool settingsFramePending = false;
+bool controllerSettingsLoaded = false;
 
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
-const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
+char preset[3][13] = {"PARK", "DRIVE", "LIFT"};
 const uint8_t buttonPins[BUTTON_COUNT] = {
   BTN_UP, BTN_DOWN, BTN_MENU, BTN_NEXT, BTN_OK, BTN_PARK, BTN_DRIVE, BTN_LIFT, BTN_IN, BTN_OUT, BTN_PRESET
 };
@@ -98,26 +126,28 @@ uint16_t target[3][4] = {{20,20,20,20}, {55,55,55,55}, {80,80,80,80}};
 int shownPressure[5] = {-9999, -9999, -9999, -9999, -9999};
 bool lastButton[BUTTON_COUNT] = {};
 bool telemetry = false;
-bool linked = false, scanRequested = true, connectRequested = false, pendingValid = false;
+bool linked = false;
+volatile bool discoveryConfirmPending = false;
+volatile uint32_t discoveryConfirmAtMs = 0;
 bool manualMode = false, valveOpen = false, presetRunning = false, presetStopSent = false;
 bool wheelComplete[4] = {}, wheelAlarm[4] = {};
 float lockedPressure[4] = {NAN, NAN, NAN, NAN};
-uint32_t completeAt[4] = {}, frameAt = 0, lastInput = 0, lastConnect = 0, lastStatus = 0;
+uint32_t completeAt[4] = {}, frameAt = 0, lastInput = 0, lastStatus = 0;
 bool blink = false;
 uint8_t active = 0, cursor = 0, selectedWheel = 0, editPreset = 0, editWheel = 0, calSensor = 0;
 uint16_t calValue = 0;
 Page page = HOME;
+bool nameEditMode=false;uint8_t nameCursor=0;
 BleState bleState = SEARCHING;
 
 void printBar(float v) { if (isnan(v)) tft.print("--.-"); else tft.printf("%.1f", v); }
 void sendCommand(const uint8_t *p, size_t n) {
-  if (linked && client && client->isConnected() && commandChar && commandChar->canWrite()) commandChar->writeValue(p, n, true);
+  if (linked && controllerPeerKnown && n > 0 && n <= 250) esp_now_send(controllerMac, p, n);
 }
 void stopAll() { const uint8_t p[] = {0xB1, 0x2F}; sendCommand(p, sizeof(p)); valveOpen = false; }
 void tune(uint8_t w) {
   if (w > 3) return;
-  const uint16_t v = target[active][w];
-  const uint8_t p[] = {0xB1, 0x40, w, (uint8_t)v, (uint8_t)(v >> 8)};
+  const uint8_t p[] = {0xB1, 0x45, active, w};
   sendCommand(p, sizeof(p));
 }
 void valve(uint8_t w, bool fill) {
@@ -203,7 +233,7 @@ void menuRow(uint8_t row, const char *text, bool selected) {
 }
 void settings() { header("MENU"); const char *m[] = {"START PRESET", "EDIT PRESETS", "CALIBRATE", "BACK TO DASHBOARD"}; for (uint8_t i = 0; i < 4; ++i) menuRow(i, m[i], i == cursor); }
 void picker() { header("START PRESET"); for (uint8_t i = 0; i < 3; ++i) menuRow(i, preset[i], i == cursor); tft.setTextColor(DIM); tft.setCursor(10, 155); tft.print("OK sends the selected targets"); }
-void editor() { header("EDIT PRESETS"); tft.setTextColor(DIM); tft.setCursor(12, 42); tft.print(preset[editPreset]); for (uint8_t i = 0; i < 4; ++i) { const int y = 55 + i * 31; const bool sel = i == editWheel; tft.fillRoundRect(8, y, 304, 24, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 24, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 8); tft.print(wheel[i]); tft.setCursor(248, y + 8); tft.printf("%.1f", target[editPreset][i] / 10.0f); } }
+void editor() { header(nameEditMode ? "EDIT PRESET NAME" : "EDIT PRESETS"); tft.setTextColor(DIM); tft.setCursor(12, 42); tft.print(preset[editPreset]); if(nameEditMode){tft.setTextColor(ORANGE);tft.setCursor(12,65);tft.printf("CHAR %u / 12",nameCursor+1);tft.setCursor(12,92);tft.print("UP/DN change  OK next");tft.setCursor(12,115);tft.print("NEXT saves name");return;} for (uint8_t i = 0; i < 4; ++i) { const int y = 55 + i * 31; const bool sel = i == editWheel; tft.fillRoundRect(8, y, 304, 24, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 24, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 8); tft.print(wheel[i]); tft.setCursor(248, y + 8); tft.printf("%.1f", target[editPreset][i] / 10.0f); } }
 void calibration() { header("CALIBRATE"); for (uint8_t i = 0; i < 5; ++i) { const int y = 40 + i * 27; const bool sel = i == calSensor; tft.fillRoundRect(8, y, 304, 21, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 21, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 7); tft.print(i < 4 ? wheel[i] : "TANK"); tft.setCursor(245, y + 7); if (sel) tft.printf("%.1f", calValue / 10.0f); else printBar(pressure[i]); } }
 void render() { if (page == HOME) home(); else if (page == SETTINGS) settings(); else if (page == PICKER) picker(); else if (page == EDITOR) editor(); else calibration(); }
 
@@ -230,22 +260,88 @@ void updateArrival() {
 }
 void refreshTelemetry() { for (uint8_t i = 0; i < 5; ++i) { const int n = isnan(pressure[i]) ? -9999 : (int)lroundf(pressure[i] * 10.0f); if (n != shownPressure[i]) { shownPressure[i] = n; if (page == HOME) { if (i < 4) drawWheel(i); else drawTank(); } } } }
 
-void onPressure(NimBLERemoteCharacteristic *, uint8_t *data, size_t n, bool) { if (n == sizeof(PressurePacket) && data[0] == 0xA1) { PressurePacket p; memcpy(&p, data, sizeof(p)); for (uint8_t i = 0; i < 5; ++i) pressure[i] = p.bar[i]; telemetry = true; } }
-class ClientCB : public NimBLEClientCallbacks { void onDisconnect(NimBLEClient *, int) override { linked = false; commandChar = nullptr; scanRequested = true; bleState = RETRYING; } } clientCB;
-class ScanCB : public NimBLEScanCallbacks { void onResult(const NimBLEAdvertisedDevice *d) override { if (!linked && !connectRequested && d->isAdvertisingService(NimBLEUUID(SERVICE_UUID))) { pendingAddress = d->getAddress(); pendingValid = true; connectRequested = true; bleState = CONNECTING; NimBLEDevice::getScan()->stop(); } } } scanCB;
-void bluetooth() {
-  NimBLEScan *scan = NimBLEDevice::getScan();
-  if (connectRequested && pendingValid && !scan->isScanning()) {
-    connectRequested = false; pendingValid = false; lastConnect = millis();
-    if (client) NimBLEDevice::deleteClient(client);
-    client = NimBLEDevice::createClient(); client->setClientCallbacks(&clientCB, false); client->setConnectTimeout(10);
-    if (client->connect(pendingAddress)) { NimBLERemoteService *svc = client->getService(SERVICE_UUID); commandChar = svc ? svc->getCharacteristic(COMMAND_UUID) : nullptr; NimBLERemoteCharacteristic *pc = svc ? svc->getCharacteristic(PRESSURE_UUID) : nullptr; if (commandChar && commandChar->canWrite() && pc && pc->canNotify() && pc->subscribe(true, onPressure)) { linked = true; bleState = CONNECTED; if (page == HOME) footer(); return; } client->disconnect(); }
-    scanRequested = true; bleState = RETRYING;
+bool addControllerPeer(const uint8_t *mac) {
+  if (controllerPeerKnown && memcmp(controllerMac, mac, 6) == 0) return true;
+  if (controllerPeerKnown) esp_now_del_peer(controllerMac);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, mac, 6); peer.channel = ESPNOW_CHANNEL; peer.encrypt = true;
+  memcpy(peer.lmk, ESPNOW_KEY, sizeof(ESPNOW_KEY));
+  if (esp_now_add_peer(&peer) != ESP_OK) return false;
+  memcpy(controllerMac, mac, 6); controllerPeerKnown = true; return true;
+}
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
+  if (!mac_addr || !data) return;
+  if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
+    bleState = CONNECTING;
+    if (addControllerPeer(mac_addr)) {
+      // Wait for the controller to switch from its temporary open peer to
+      // the encrypted peer before sending the encrypted confirmation.
+      discoveryConfirmAtMs = millis() + 250U;
+      discoveryConfirmPending = true;
+    }
+    return;
   }
-  if (!linked && scanRequested && !scan->isScanning() && millis() - lastConnect > 800U) { scanRequested = false; bleState = SEARCHING; scan->setScanCallbacks(&scanCB, false); scan->setActiveScan(true); scan->setInterval(80); scan->setWindow(40); scan->start(0, false); }
+  if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    memcpy(&receivedSettings, data, sizeof(receivedSettings)); settingsFramePending = true;
+  } else if (len == (int)sizeof(PressurePacket) && data[0] == 0xA1) {
+    PressurePacket packet; memcpy(&packet, data, sizeof(packet));
+    for (uint8_t i = 0; i < 5; ++i) pressure[i] = packet.bar[i];
+    telemetry = true;
+  } else return;
+  lastControllerPacketMs = millis();
+}
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status) {
+  if (status != ESP_NOW_SEND_SUCCESS && linked) { linked = false; bleState = RETRYING; }
+}
+void setupEspNow() {
+  WiFi.mode(WIFI_STA); WiFi.disconnect(false, true);
+  if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) != ESP_OK || esp_now_init() != ESP_OK) return;
+  esp_now_set_pmk(ESPNOW_KEY);
+  esp_now_register_recv_cb(onEspNowReceive); esp_now_register_send_cb(onEspNowSend);
+  esp_now_peer_info_t broadcastPeer = {};
+  memcpy(broadcastPeer.peer_addr, ESPNOW_BROADCAST, 6); broadcastPeer.channel = ESPNOW_CHANNEL; broadcastPeer.encrypt = false;
+  esp_now_add_peer(&broadcastPeer);
+}
+void sendDiscovery() { const uint8_t hello[2] = {0xE1,0x01}; esp_now_send(ESPNOW_BROADCAST, hello, sizeof(hello)); }
+void serviceEspNow() {
+  const uint32_t now = millis();
+  if (discoveryConfirmPending && (int32_t)(now - discoveryConfirmAtMs) >= 0) {
+    discoveryConfirmPending = false;
+    const uint8_t confirm[2] = {0xE1, 0x02};
+    esp_now_send(controllerMac, confirm, sizeof(confirm));
+  }
+  const bool fresh = controllerPeerKnown && now - lastControllerPacketMs < CONTROLLER_TIMEOUT_MS;
+  if (fresh != linked) {
+    linked = fresh; bleState = fresh ? CONNECTED : RETRYING;
+    if (!fresh) { if (controllerPeerKnown) esp_now_del_peer(controllerMac); controllerPeerKnown = false; discoveryConfirmPending = false; controllerSettingsLoaded = false; memset(controllerMac, 0, sizeof(controllerMac)); lastControllerPacketMs = 0; lastDiscoveryMs = now; }
+    if (page == HOME) footer();
+  }
+  if (!fresh && now - lastDiscoveryMs >= DISCOVERY_INTERVAL_MS) { lastDiscoveryMs = now; sendDiscovery(); if (page == HOME) footer(); }
+  if (fresh && now - lastDiscoveryMs >= DISCOVERY_INTERVAL_MS) { lastDiscoveryMs = now; const uint8_t beat[2] = {0xE1,0x02}; esp_now_send(controllerMac, beat, sizeof(beat)); }
+  applyControllerSettings();
+}
+void sendSettingsUpdate() {
+  if (!controllerSettingsLoaded || !linked) return;
+  uint8_t packet[50] = {0xB1,0x43}; size_t at = 2;
+  for (uint8_t i = 0; i < 4; ++i, at += 2) { packet[at] = controllerSettings.wheelLimitDbar[i] & 0xFF; packet[at+1] = controllerSettings.wheelLimitDbar[i] >> 8; }
+  const uint16_t fixed[] = {controllerSettings.tankLimitDbar, controllerSettings.compressorOnDbar, controllerSettings.targetToleranceDbar, controllerSettings.autoTimeoutSec, controllerSettings.compressorMaxRunSec, controllerSettings.manualTimeoutMs};
+  for (uint8_t i = 0; i < 6; ++i, at += 2) { packet[at] = fixed[i] & 0xFF; packet[at+1] = fixed[i] >> 8; }
+  for (uint8_t p = 0; p < 3; ++p) for (uint8_t w = 0; w < 4; ++w, at += 2) { packet[at] = target[p][w] & 0xFF; packet[at+1] = target[p][w] >> 8; }
+  const uint32_t checksum = checkBytes(packet, 46); memcpy(&packet[46], &checksum, sizeof(checksum));
+  sendCommand(packet, sizeof(packet));
+}
+void applyControllerSettings() {
+  if (!settingsFramePending) return;
+  SettingsFrame snapshot; noInterrupts(); memcpy(&snapshot, &receivedSettings, sizeof(snapshot)); settingsFramePending = false; interrupts();
+  if (snapshot.marker != 0xA2 || snapshot.version != 2 || snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
+  controllerSettings = snapshot; memcpy(target, snapshot.presetDbar, sizeof(target)); memcpy(preset,snapshot.presetNames,sizeof(preset)); controllerSettingsLoaded = true;
+  if (page == EDITOR) editor();
 }
 
-void saveTarget() { char k[8]; snprintf(k, sizeof(k), "p%uw%u", editPreset, editWheel); prefs.putUShort(k, target[editPreset][editWheel]); }
+void sendPresetNameUpdate(){uint8_t packet[19]={0xB1,0x46,editPreset};memcpy(&packet[3],preset[editPreset],12);const uint32_t sum=checkBytes(packet,15);memcpy(&packet[15],&sum,4);sendCommand(packet,sizeof(packet));}
+void cycleNameChar(int8_t delta){static const char alphabet[]=" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";char &ch=preset[editPreset][nameCursor];const char *at=strchr(alphabet,ch);int pos=at?(int)(at-alphabet):0;const int count=(int)sizeof(alphabet)-1;pos=(pos+delta+count)%count;ch=alphabet[pos];}
+void saveTarget() { sendSettingsUpdate(); }
 void press(Button b) {
   lastInput = millis();
   if (page == HOME) {
@@ -260,7 +356,7 @@ void press(Button b) {
   }
   if (page == SETTINGS) { if (b == UP && cursor) cursor--; else if (b == DOWN && cursor < 3) cursor++; else if (b == CONFIRM) { if (cursor == 0) { page = PICKER; cursor = 0; } else if (cursor == 1) { page = EDITOR; editPreset = active; editWheel = 0; } else if (cursor == 2) { page = CALIBRATION; calSensor = 0; calValue = 0; } else page = HOME; } else if (b == MENU) page = HOME; render(); return; }
   if (page == PICKER) { if (b == UP && cursor) cursor--; else if (b == DOWN && cursor < 2) cursor++; else if (b == CONFIRM) { choosePreset(cursor); page = HOME; } else if (b == MENU) page = SETTINGS; render(); return; }
-  if (page == EDITOR) { if (b == UP && target[editPreset][editWheel] < 150) target[editPreset][editWheel]++; else if (b == DOWN && target[editPreset][editWheel]) target[editPreset][editWheel]--; else if (b == CONFIRM) editWheel = (editWheel + 1) % 4; else if (b == NEXT) editPreset = (editPreset + 1) % 3; else if (b == MENU) { page = SETTINGS; cursor = 1; } saveTarget(); render(); return; }
+  if (page == EDITOR) { if (!controllerSettingsLoaded) return; if(b==PRESET){if(nameEditMode)sendPresetNameUpdate();nameEditMode=!nameEditMode;nameCursor=0;render();return;} if(nameEditMode){if(b==UP)cycleNameChar(1);else if(b==DOWN)cycleNameChar(-1);else if(b==CONFIRM)nameCursor=(nameCursor+1)%12;else if(b==NEXT){sendPresetNameUpdate();nameEditMode=false;}else if(b==MENU){sendPresetNameUpdate();nameEditMode=false;page=SETTINGS;cursor=1;}render();return;} if (b == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) target[editPreset][editWheel]++; else if (b == DOWN && target[editPreset][editWheel]) target[editPreset][editWheel]--; else if (b == CONFIRM) editWheel = (editWheel + 1) % 4; else if (b == NEXT) editPreset = (editPreset + 1) % 3; else if (b == MENU) { page = SETTINGS; cursor = 1; } saveTarget(); render(); return; }
   if (page == CALIBRATION) { if (b == UP && calValue < 150) calValue++; else if (b == DOWN && calValue) calValue--; else if (b == NEXT) calSensor = (calSensor + 1) % 5; else if (b == CONFIRM) { const uint8_t p[] = {0xB1, 0x41, calSensor, (uint8_t)calValue, (uint8_t)(calValue >> 8)}; sendCommand(p, sizeof(p)); } else if (b == MENU) { page = SETTINGS; cursor = 2; } render(); }
 }
 void buttons() {
@@ -285,12 +381,12 @@ void setup() {
   for (uint8_t i = 0; i < BUTTON_COUNT; ++i) { pinMode(buttonPins[i], INPUT_PULLUP); lastButton[i] = digitalRead(buttonPins[i]) == LOW; }
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS); tft.init(240, 320); tft.setRotation(1);
   prefs.begin("airride", false); active = prefs.getUChar("preset", 0); if (active > 2) active = 0;
-  for (uint8_t a = 0; a < 3; ++a) for (uint8_t b = 0; b < 4; ++b) { char k[8]; snprintf(k, sizeof(k), "p%uw%u", a, b); target[a][b] = prefs.getUShort(k, target[a][b]); }
-  NimBLEDevice::init("AirRide Remote"); NimBLEDevice::setMTU(64);
+  // Presets are retrieved from the controller after the encrypted radio link is established.
+  setupEspNow();
   home();
 }
 void loop() {
-  bluetooth(); buttons();
+  serviceEspNow(); buttons();
   if (telemetry) { telemetry = false; refreshTelemetry(); }
   updateArrival();
   if (page == HOME && millis() - lastStatus > 1500U) { lastStatus = millis(); footer(); }

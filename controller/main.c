@@ -22,23 +22,34 @@ typedef struct { bool active,pulse,settled; float goal; uint32_t start,pulseAt,n
 typedef struct __attribute__((packed)) {
   uint32_t magic; uint32_t format; uint32_t generation;
   float zero[5];
-  uint16_t wheelLimitDbar[4]; uint16_t tankLimitDbar;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
   uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec;
   uint16_t manualTimeoutMs; uint16_t calibrationReferenceDbar[5];
   uint8_t calibratedMask; uint32_t check;
 } ControllerConfig;
+typedef struct __attribute__((packed)) {
+  uint32_t magic; uint32_t format; uint32_t generation;
+  float zero[5];
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
+  uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
+  uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec;
+  uint16_t manualTimeoutMs; uint16_t calibrationReferenceDbar[5];
+  uint8_t calibratedMask; uint32_t check;
+} ControllerConfigV2;
 typedef struct __attribute__((packed)) { uint32_t magic; uint32_t revision; float zero[5]; uint32_t check; } LegacyCalibrationStore;
 typedef struct __attribute__((packed)) {
   uint8_t marker,version; uint32_t generation;
-  uint16_t wheelLimitDbar[4]; uint16_t tankLimitDbar;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4]; uint16_t tankLimitDbar;
   uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
   uint32_t check;
 } SettingsFrame;
 typedef struct __attribute__((packed)) { uint8_t marker,opcode,status; uint32_t generation; } AckFrame;
-typedef struct { uint8_t len; uint8_t data[32]; } Command;
+#define COMMAND_MAX_SIZE 50
+typedef struct { uint8_t len; uint8_t data[COMMAND_MAX_SIZE]; } Command;
 
 static const gpio_num_t fill[4]={GPIO_NUM_4,GPIO_NUM_14,GPIO_NUM_17,GPIO_NUM_19};
 static const gpio_num_t dump[4]={GPIO_NUM_13,GPIO_NUM_16,GPIO_NUM_18,GPIO_NUM_21};
@@ -51,8 +62,9 @@ static uint8_t peerMac[6],pendingPeerMac[6]; static uint32_t pendingEncryptionAt
 static QueueHandle_t commandQueue;
 static const float sensorFullScalePsi[5]={150.0f,150.0f,150.0f,150.0f,300.0f};
 #define CFG_MAGIC 0x41524944UL
-#define CFG_FORMAT 2UL
-#define CFG_KEY "cfg_v2"
+#define CFG_FORMAT 3UL
+#define CFG_KEY "cfg_v3"
+#define CFG_KEY_V2 "cfg_v2"
 #define LEGACY_CAL_MAGIC 0x41524944UL
 #define LEGACY_CAL_REVISION 1UL
 #define ABS_WHEEL_LIMIT_DBAR 100
@@ -66,15 +78,24 @@ typedef struct __attribute__((packed)) {
 } CalibrationState;
 static uint16_t calBar10[5]={0,0,0,0,0};
 static uint8_t calValidMask=0;
+static char presetNames[3][13]={{"PARK"},{"DRIVE"},{"LIFT"}};
+static uint32_t checkBytes(const uint8_t *b,size_t len);
+typedef struct __attribute__((packed)){char names[3][13];uint32_t check;} PresetNameStore;
+static uint32_t nameStoreCheck(const PresetNameStore *s){return checkBytes((const uint8_t*)s,offsetof(PresetNameStore,check));}
+static bool validPresetName(const char *s){bool any=false;for(uint8_t i=0;i<12;i++){unsigned char ch=(unsigned char)s[i];if(ch==0)break;if(ch<32||ch>126)return false;if(ch!=' ')any=true;}return any;}
+static void loadPresetNames(void){memcpy(presetNames[0],"PARK",5);memcpy(presetNames[1],"DRIVE",6);memcpy(presetNames[2],"LIFT",5);nvs_handle_t h;if(nvs_open("airride",NVS_READONLY,&h)!=ESP_OK)return;PresetNameStore saved={0};size_t bytes=sizeof(saved);if(nvs_get_blob(h,"preset_names",&saved,&bytes)==ESP_OK&&bytes==sizeof(saved)&&saved.check==nameStoreCheck(&saved)){bool valid=true;for(uint8_t i=0;i<3;i++)valid=valid&&saved.names[i][12]==0&&validPresetName(saved.names[i]);if(valid)memcpy(presetNames,saved.names,sizeof(presetNames));}nvs_close(h);}
+static bool savePresetName(uint8_t index,const uint8_t *raw){if(index>2)return false;char candidate[13]={0};memcpy(candidate,raw,12);if(!validPresetName(candidate))return false;for(int i=11;i>=0&&candidate[i]==' ';i--)candidate[i]=0;if(!candidate[0])return false;PresetNameStore next={0};memcpy(next.names,presetNames,sizeof(next.names));memcpy(next.names[index],candidate,sizeof(candidate));next.check=nameStoreCheck(&next);nvs_handle_t h;if(nvs_open("airride",NVS_READWRITE,&h)!=ESP_OK)return false;esp_err_t e=nvs_set_blob(h,"preset_names",&next,sizeof(next));if(e==ESP_OK)e=nvs_commit(h);PresetNameStore verify={0};size_t bytes=sizeof(verify);if(e==ESP_OK)e=nvs_get_blob(h,"preset_names",&verify,&bytes);bool ok=e==ESP_OK&&bytes==sizeof(verify)&&verify.check==nameStoreCheck(&verify)&&memcmp(&next,&verify,sizeof(next))==0;nvs_close(h);if(ok)memcpy(presetNames,verify.names,sizeof(presetNames));return ok;}
 static uint32_t now(void){return xTaskGetTickCount()*portTICK_PERIOD_MS;}
 static bool elapsed(uint32_t n,uint32_t a,uint32_t t){return (uint32_t)(n-a)>=t;}
 static uint32_t checkBytes(const uint8_t *b,size_t len){uint32_t v=0x6D2B79F5UL;for(size_t i=0;i<len;i++){v=(v<<5)|(v>>27);v^=b[i];}return v;}
 static uint32_t configCheck(const ControllerConfig *s){return checkBytes((const uint8_t*)s,offsetof(ControllerConfig,check));}
 static uint32_t legacyCheck(const LegacyCalibrationStore *s){return checkBytes((const uint8_t*)s,offsetof(LegacyCalibrationStore,check));}
+static uint32_t configV2Check(const ControllerConfigV2 *s){return checkBytes((const uint8_t*)s,offsetof(ControllerConfigV2,check));}
 static bool validConfig(const ControllerConfig *c){
   if(c->magic!=CFG_MAGIC||c->format!=CFG_FORMAT||c->check!=configCheck(c))return false;
   for(uint8_t i=0;i<5;i++)if(!isfinite(c->zero[i])||c->zero[i]<.2f||c->zero[i]>.8f)return false;
   for(uint8_t i=0;i<4;i++)if(c->wheelLimitDbar[i]<1||c->wheelLimitDbar[i]>ABS_WHEEL_LIMIT_DBAR)return false;
+  for(uint8_t p=0;p<3;p++)for(uint8_t w=0;w<4;w++)if(c->presetDbar[p][w]>c->wheelLimitDbar[w])return false;
   if(c->tankLimitDbar<1||c->tankLimitDbar>ABS_TANK_LIMIT_DBAR)return false;
   if(c->compressorOnDbar>=c->tankLimitDbar||c->targetToleranceDbar<1||c->targetToleranceDbar>20)return false;
   if(c->autoTimeoutSec<1||c->autoTimeoutSec>30||c->compressorMaxRunSec<1||c->compressorMaxRunSec>180)return false;
@@ -86,6 +107,7 @@ static void defaultConfig(ControllerConfig *c){
   memset(c,0,sizeof(*c));c->magic=CFG_MAGIC;c->format=CFG_FORMAT;
   for(uint8_t i=0;i<5;i++)c->zero[i]=.5f;
   for(uint8_t i=0;i<4;i++)c->wheelLimitDbar[i]=100;
+  for(uint8_t w=0;w<4;w++){c->presetDbar[0][w]=20;c->presetDbar[1][w]=55;c->presetDbar[2][w]=80;}
   c->tankLimitDbar=150;c->compressorOnDbar=120;c->targetToleranceDbar=2;
   c->autoTimeoutSec=30;c->compressorMaxRunSec=180;c->manualTimeoutMs=2000;
 }
@@ -112,6 +134,18 @@ static void loadConfig(void){
   if(nvs_open("airride",NVS_READWRITE,&h)!=ESP_OK)return;
   ControllerConfig saved={0};size_t bytes=sizeof(saved);
   if(nvs_get_blob(h,CFG_KEY,&saved,&bytes)==ESP_OK&&bytes==sizeof(saved)&&validConfig(&saved)){config=saved;syncCalibrationStateFromConfig();nvs_close(h);return;}
+  ControllerConfigV2 previous={0};bytes=sizeof(previous);
+  if(nvs_get_blob(h,CFG_KEY_V2,&previous,&bytes)==ESP_OK&&bytes==sizeof(previous)&&previous.magic==CFG_MAGIC&&previous.format==2UL&&previous.check==configV2Check(&previous)){
+    ControllerConfig migrated=config;
+    memcpy(migrated.zero,previous.zero,sizeof(migrated.zero));
+    memcpy(migrated.wheelLimitDbar,previous.wheelLimitDbar,sizeof(migrated.wheelLimitDbar));
+    migrated.tankLimitDbar=previous.tankLimitDbar;migrated.compressorOnDbar=previous.compressorOnDbar;
+    migrated.targetToleranceDbar=previous.targetToleranceDbar;migrated.autoTimeoutSec=previous.autoTimeoutSec;
+    migrated.compressorMaxRunSec=previous.compressorMaxRunSec;migrated.manualTimeoutMs=previous.manualTimeoutMs;
+    memcpy(migrated.calibrationReferenceDbar,previous.calibrationReferenceDbar,sizeof(migrated.calibrationReferenceDbar));
+    migrated.calibratedMask=previous.calibratedMask;
+    if(validConfig(&migrated)){config=migrated;nvs_close(h);syncCalibrationStateFromConfig();ControllerConfig upgraded=config;persistConfig(upgraded);return;}
+  }
   LegacyCalibrationStore old={0};bytes=sizeof(old);
   if(nvs_get_blob(h,"cal_v1",&old,&bytes)==ESP_OK&&bytes==sizeof(old)&&old.magic==LEGACY_CAL_MAGIC&&old.revision==LEGACY_CAL_REVISION&&old.check==legacyCheck(&old)){
     bool good=true;for(uint8_t i=0;i<5;i++)good=good&&isfinite(old.zero[i])&&old.zero[i]>=.2f&&old.zero[i]<=.8f;
@@ -139,15 +173,16 @@ static void sendSettings(void){
   if(!linked||!encrypted){
     return;
   }
-  SettingsFrame f={0};f.marker=0xA2;f.version=1;f.generation=config.generation;
-  memcpy(f.wheelLimitDbar,config.wheelLimitDbar,sizeof(f.wheelLimitDbar));f.tankLimitDbar=config.tankLimitDbar;
+  SettingsFrame f={0};f.marker=0xA2;f.version=2;f.generation=config.generation;
+  memcpy(f.wheelLimitDbar,config.wheelLimitDbar,sizeof(f.wheelLimitDbar));memcpy(f.presetDbar,config.presetDbar,sizeof(f.presetDbar));f.tankLimitDbar=config.tankLimitDbar;
   f.compressorOnDbar=config.compressorOnDbar;f.targetToleranceDbar=config.targetToleranceDbar;
   f.autoTimeoutSec=config.autoTimeoutSec;f.compressorMaxRunSec=config.compressorMaxRunSec;f.manualTimeoutMs=config.manualTimeoutMs;
   f.calibratedMask=config.calibratedMask;memcpy(f.calibrationReferenceDbar,config.calibrationReferenceDbar,sizeof(f.calibrationReferenceDbar));
   for(uint8_t i=0;i<5;i++)f.zeroMilliVolts[i]=(int16_t)lroundf(config.zero[i]*1000.0f);
+  memcpy(f.presetNames,presetNames,sizeof(f.presetNames));
   f.check=checkBytes((const uint8_t*)&f,offsetof(SettingsFrame,check));esp_now_send(peerMac,(const uint8_t*)&f,sizeof(f));
 }
-static void sendAck(uint8_t opcode,bool ok){if(!linked||!encrypted)return;AckFrame a={.marker=0xA3,.opcode=opcode,.status=(uint8_t)(ok?1:0),.generation=config.generation};esp_now_send(peerMac,(const uint8_t*)&a,sizeof(a));}
+static void sendAck(uint8_t opcode,uint8_t status){if(!linked||!encrypted)return;AckFrame a={.marker=0xA3,.opcode=opcode,.status=status,.generation=config.generation};esp_now_send(peerMac,(const uint8_t*)&a,sizeof(a));}
 static void rx(const esp_now_recv_info_t *info,const uint8_t *data,int len){
   if(!info||!data||len<2)return;
   ESP_LOGI(TAG,"schematik-debug RX len=%d src=%02X:%02X:%02X:%02X:%02X:%02X data=%02X %02X",len,info->src_addr[0],info->src_addr[1],info->src_addr[2],info->src_addr[3],info->src_addr[4],info->src_addr[5],data[0],data[1]);
@@ -163,42 +198,48 @@ static void rx(const esp_now_recv_info_t *info,const uint8_t *data,int len){
   if(len==2&&data[0]==0xE1&&data[1]==2&&peer&&encrypted&&!memcmp(peerMac,info->src_addr,6)){
     if(!linked){linked=true;settingsPending=true;}lastBeat=now();teleNow=true;return;
   }
-  if(!linked||!peer||!encrypted||memcmp(peerMac,info->src_addr,6)||data[0]!=0xB1||len>32)return;
+  if(!linked||!peer||!encrypted||memcmp(peerMac,info->src_addr,6)||data[0]!=0xB1||len>COMMAND_MAX_SIZE)return;
   lastBeat=now();
   if(len==2&&data[0]==0xB1&&data[1]==0x43){sendCalibrationState();return;}
   Command c={.len=(uint8_t)len};memcpy(c.data,data,(size_t)len);
   BaseType_t queued=commandQueue?xQueueSend(commandQueue,&c,0):pdFALSE;
   ESP_LOGI(TAG,"schematik-debug B1 command queue=%s opcode=%02X len=%d",queued==pdTRUE?"ok":"FULL_OR_UNREADY",data[1],len);
 }
-static bool calibrate(uint8_t s,uint16_t bar10){
+/* Calibration result: 1=stored, 2=invalid input, 3=offset out of range,
+ * 4=NVS write/read-back failed, 5=ADC read failed. */
+static uint8_t calibrate(uint8_t s,uint16_t bar10){
   if(s>4||bar10>(s==4?150:100)){
-    return false;
+    ESP_LOGW(TAG,"Calibration rejected: invalid sensor=%u reference_dbar=%u",(unsigned)s,(unsigned)bar10);
+    return 2;
   }
   ESP_LOGI(TAG,"Calibration request sensor=%u reference_dbar=%u",(unsigned)s,(unsigned)bar10);
   stopAll();float sum=0;
-  for(uint8_t i=0;i<32;i++){int r;esp_err_t e=adc_oneshot_read(adc,channel[s],&r);if(e!=ESP_OK){ESP_LOGE(TAG,"Calibration ADC read failed: %s",esp_err_to_name(e));return false;}sum+=(float)r*3.3f/4095.0f*(28.0f/18.0f);vTaskDelay(pdMS_TO_TICKS(2));}
+  for(uint8_t i=0;i<32;i++){int r;esp_err_t e=adc_oneshot_read(adc,channel[s],&r);if(e!=ESP_OK){ESP_LOGE(TAG,"Calibration ADC read failed: %s",esp_err_to_name(e));return 5;}sum+=(float)r*3.3f/4095.0f*(28.0f/18.0f);vTaskDelay(pdMS_TO_TICKS(2));}
   const float knownPsi=((float)bar10/10.0f)/.0689476f;
   const float z=sum/32.0f-knownPsi/(sensorFullScalePsi[s]/4.0f);
-  if(!isfinite(z)||z<.2f||z>.8f){ESP_LOGE(TAG,"Calibration rejected: computed offset %.3f V outside 0.2..0.8 V",(double)z);return false;}
+  if(!isfinite(z)||z<.2f||z>.8f){ESP_LOGE(TAG,"Calibration rejected: computed offset %.3f V outside 0.2..0.8 V",(double)z);return 3;}
   ControllerConfig next=config;next.zero[s]=z;next.calibrationReferenceDbar[s]=bar10;next.calibratedMask|=(uint8_t)(1U<<s);
   ESP_LOGI(TAG,"Calibration computed offset=%.3f V",(double)z);
   bool saved=persistConfig(next);ESP_LOGI(TAG,"Calibration save result=%s",saved?"verified":"FAILED");
-  if(!saved)return false;
+  if(!saved)return 4;
   calBar10[s]=bar10;calValidMask|=(uint8_t)(1U<<s);
-  return true;
+  return 1;
 }
-static void manualStart(uint8_t w,bool up,float p[5]){if(w>3||!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w))))return;cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
+static float minimumWheelPsi(void){return (2.0f/10.0f)/.0689476f;}
+static void manualStart(uint8_t w,bool up,float p[5]){if(w>3)return;if(!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w)))||(!up&&p[w]<=minimumWheelPsi())){cancel(w);return;}cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
 static void targetStart(uint8_t w,uint16_t b){if(w>3||b>config.wheelLimitDbar[w])return;cancel(w);jobs[w].active=true;jobs[w].goal=((float)b/10.0f)/.0689476f;jobs[w].start=jobs[w].next=now();}
+static void presetStart(uint8_t preset){if(preset>2)return;for(uint8_t w=0;w<4;w++)targetStart(w,config.presetDbar[preset][w]);}
 static uint16_t readLe16(const uint8_t *p){return (uint16_t)p[0]|((uint16_t)p[1]<<8);}
 static uint32_t readLe32(const uint8_t *p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
 static bool changeSettings(const uint8_t *c,uint8_t len){
-  /* B1 43 + 20 bytes of settings + 32-bit checksum over the 22-byte header/payload. */
-  if(len!=26||readLe32(&c[22])!=checkBytes(c,22))return false;
+  /* B1 43 + controller settings + preset table + 32-bit checksum. */
+  if(len!=50||readLe32(&c[46])!=checkBytes(c,46))return false;
   ControllerConfig next=config;size_t at=2;
   for(uint8_t i=0;i<4;i++,at+=2)next.wheelLimitDbar[i]=readLe16(&c[at]);
   next.tankLimitDbar=readLe16(&c[at]);at+=2;next.compressorOnDbar=readLe16(&c[at]);at+=2;
   next.targetToleranceDbar=readLe16(&c[at]);at+=2;next.autoTimeoutSec=readLe16(&c[at]);at+=2;
-  next.compressorMaxRunSec=readLe16(&c[at]);at+=2;next.manualTimeoutMs=readLe16(&c[at]);
+  next.compressorMaxRunSec=readLe16(&c[at]);at+=2;next.manualTimeoutMs=readLe16(&c[at]);at+=2;
+  for(uint8_t p=0;p<3;p++)for(uint8_t w=0;w<4;w++,at+=2)next.presetDbar[p][w]=readLe16(&c[at]);
   return persistConfig(next);
 }
 static void runJob(uint8_t w,float p[5]){
@@ -211,22 +252,25 @@ static void runJob(uint8_t w,float p[5]){
   float e=j->goal-p[w];
   float tolerance=((float)config.targetToleranceDbar/10.0f)/.0689476f;
   if(fabsf(e)<=tolerance){closeWheel(w);if(!j->settled){j->settled=true;j->settledAt=n;}else if(elapsed(n,j->settledAt,2000))j->active=false;return;}
-  j->settled=false;if(e>0){if(!good(4,p[4])||p[4]>=tankLimitPsi()){cancel(w);return;}set(fill[w],1);}else set(dump[w],1);
+  j->settled=false;if(e>0){if(!good(4,p[4])||p[4]>=tankLimitPsi()){cancel(w);return;}set(fill[w],1);}else{if(p[w]<=minimumWheelPsi()){cancel(w);return;}set(dump[w],1);}
   j->pulse=true;j->pulseAt=n;
 }
 static void process(const uint8_t *c,uint8_t len,float p[5]){
   if(len<2||c[0]!=0xB1)return;
   if(len==2&&c[1]==0x42){sendSettings();return;}
-  if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok);sendSettings();return;}
+  if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok?1:0);sendSettings();return;}
+  if(c[1]==0x46&&len==19){bool ok=readLe32(&c[15])==checkBytes(c,15)&&savePresetName(c[2],&c[3]);sendAck(0x46,ok?1:0);sendSettings();return;}
   if(len==5&&c[1]==0x40){uint16_t v=readLe16(&c[3]);targetStart(c[2],v);return;}
-  if(len==5&&c[1]==0x41){bool ok=calibrate(c[2],readLe16(&c[3]));sendAck(0x41,ok);sendSettings();if(ok)sendCalibrationState();return;}
+  if(len==3&&c[1]==0x44){presetStart(c[2]);return;}
+  if(len==4&&c[1]==0x45){uint8_t preset=c[2],wheel=c[3];if(preset<3&&wheel<4)targetStart(wheel,config.presetDbar[preset][wheel]);return;}
+  if(len==5&&c[1]==0x41){uint8_t status=calibrate(c[2],readLe16(&c[3]));sendAck(0x41,status);sendSettings();if(status==1)sendCalibrationState();return;}
   if(len==2&&c[1]==0x2F){stopAll();return;}
   if(len==2&&c[1]>=0x20&&c[1]<=0x27){manualStart((c[1]-0x20)/2,!(c[1]&1),p);return;}
   if(len==2&&c[1]>=0x30&&c[1]<=0x33)cancel(c[1]-0x30);
 }
 static void update(float p[5]){
   uint32_t n=now();
-  for(uint8_t w=0;w<4;w++)if(manual[w]&&(elapsed(n,manual[w],config.manualTimeoutMs)||p[w]>=wheelLimitPsi(w)))closeWheel(w);
+  for(uint8_t w=0;w<4;w++)if(manual[w]&&(elapsed(n,manual[w],config.manualTimeoutMs)||!good(w,p[w])||p[w]>=wheelLimitPsi(w)||p[w]<=minimumWheelPsi()))closeWheel(w);
   if(!good(4,p[4])||p[4]>=tankLimitPsi()||(compressor&&elapsed(n,compressorAt,(uint32_t)config.compressorMaxRunSec*1000U))){compressorSet(0);lockout=true;}
   else if(!lockout&&p[4]<=((float)config.compressorOnDbar/10.0f)/.0689476f)compressorSet(1);
   else if(p[4]>=tankLimitPsi())compressorSet(0);
@@ -242,9 +286,11 @@ void app_main(void){
   }
   if(nvsResult==ESP_OK){
     loadConfig();
+    loadPresetNames();
   }else{
     ESP_LOGE(TAG,"NVS initialization failed: %s; using safe defaults, calibration cannot be saved",esp_err_to_name(nvsResult));
     defaultConfig(&config);
+    loadPresetNames();
   }
   gpio_config_t o={.pin_bit_mask=(1ULL<<4)|(1ULL<<13)|(1ULL<<14)|(1ULL<<16)|(1ULL<<17)|(1ULL<<18)|(1ULL<<19)|(1ULL<<21)|(1ULL<<22),.mode=GPIO_MODE_OUTPUT};gpio_config(&o);stopAll();
   adc_oneshot_unit_init_cfg_t u={.unit_id=ADC_UNIT_1};adc_oneshot_new_unit(&u,&adc);adc_oneshot_chan_cfg_t a={.bitwidth=ADC_BITWIDTH_12,.atten=ADC_ATTEN_DB_12};for(uint8_t i=0;i<5;i++)adc_oneshot_config_channel(adc,channel[i],&a);

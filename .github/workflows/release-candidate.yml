@@ -1,0 +1,147 @@
+name: Firmware build and release candidate
+
+on:
+  pull_request:
+    paths:
+      - "controller/**"
+      - "button pult t-display/**"
+      - "buttonpult 2 inch/**"
+      - "keychain/**"
+      - ".github/workflows/release-candidate.yml"
+      - "webflasher/releases.json"
+  push:
+    tags:
+      - "v*-rc*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  controller:
+    name: Build controller firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and export sparse Intel HEX
+        working-directory: controller
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py build
+          idf.py merge-bin -f hex -o air-suspension-controller.hex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: controller-hex
+          path: controller/build/air-suspension-controller.hex
+          if-no-files-found: error
+
+  remotes:
+    name: Build remote firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio==6.1.16 esptool==4.8.1
+      - name: Build T-Display remote and preserve NVS sectors
+        working-directory: button pult t-display
+        run: |
+          pio run -e t-display
+          mkdir -p ../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32s3 merge_bin --format hex -o ../dist/air-suspension-remote-t-display.hex --flash_mode dio --flash_freq 40m --flash_size 8MB 0x0 .pio/build/t-display/bootloader.bin 0x8000 .pio/build/t-display/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/t-display/firmware.bin
+      - name: Build 2-inch remote and preserve NVS sectors
+        working-directory: buttonpult 2 inch
+        run: |
+          pio run -e remote-2inch
+          mkdir -p ../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32 merge_bin --format hex -o ../dist/air-suspension-remote-2inch.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/remote-2inch/bootloader.bin 0x8000 .pio/build/remote-2inch/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/remote-2inch/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-hex
+          path: dist/*.hex
+          if-no-files-found: error
+
+  keychain:
+    name: Build keychain remote firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio==6.1.16 esptool==4.8.1
+      - name: Build keychain remote and export Intel HEX
+        working-directory: keychain
+        run: |
+          pio run -e keychain
+          mkdir -p ../dist
+          BOOT_APP0="$(find "$HOME/.platformio" -name boot_app0.bin -print -quit)"
+          test -n "$BOOT_APP0"
+          python -m esptool --chip esp32 merge_bin --format hex -o ../dist/air-suspension-keychain.hex --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/keychain/bootloader.bin 0x8000 .pio/build/keychain/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 .pio/build/keychain/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keychain-hex
+          path: dist/air-suspension-keychain.hex
+          if-no-files-found: error
+
+  prerelease:
+    name: Publish GitHub prerelease
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-rc')
+    needs: [controller, remotes, keychain]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Air Suspension ${{ github.ref_name }}
+          prerelease: true
+          body_path: CHANGELOG.md
+          generate_release_notes: false
+          files: release-assets/*.hex
+
+  mirror-webflasher-firmware:
+    name: Mirror firmware for the web flasher
+    if: github.event_name == 'pull_request'
+    needs: [controller, remotes, keychain]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Copy HEX files into the Pages site
+        run: |
+          TAG="$(python -c 'import json; print(json.load(open("webflasher/releases.json"))["releases"][0]["tag"])')"
+          DEST="webflasher/firmware/$TAG"
+          mkdir -p "$DEST"
+          # Always replace existing images so each firmware build reaches the flasher.
+          cp -f release-assets/*.hex "$DEST/"
+      - name: Commit mirrored firmware
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webflasher/firmware
+          if git diff --cached --quiet; then
+            echo "Firmware mirror is already up to date."
+            exit 0
+          fi
+          git commit -m "Mirror release firmware for web flasher"
+          git push origin "HEAD:$BRANCH"

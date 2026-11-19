@@ -8,6 +8,8 @@
 #include <Adafruit_ST7789.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <string.h>
+#include <stddef.h>
 #include <soc/gpio_reg.h>
 #include <soc/soc.h>
 #include <esp_sleep.h>
@@ -53,12 +55,28 @@
 #define BUZZER_PIN 18
 #define PRESET_LED_PIN 44
 #define MANUAL_LED_PIN 43
-// ESP-NOW uses Wi-Fi channel 1. The controller will use the same fixed
-// channel and the same 16-byte key when it is converted in the next step.
+// ESP-NOW uses Wi-Fi channel 1 and the same 16-byte key as the controller.
 
 struct PressurePacket { uint8_t marker; float bar[5]; uint8_t flags; } __attribute__((packed));
 
 struct EspNowDiscoveryPacket { uint8_t marker; uint8_t type; } __attribute__((packed));
+struct SettingsFrame {
+  uint8_t marker,version; uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar; uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
+  uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
+  uint32_t check;
+} __attribute__((packed));
+struct SettingsAckFrame { uint8_t marker, opcode, status; uint32_t generation; } __attribute__((packed));
+static_assert(sizeof(SettingsAckFrame) == 7, "Settings ack layout changed");
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
+uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) { value = (value << 5) | (value >> 27); value ^= bytes[i]; }
+  return value;
+}
 
 enum Key : uint8_t { UP = 1, DOWN = 2, BACK = 3, NEXT = 4, KEYOK = 5,
                      PARK_KEY = 6, DRIVE_KEY = 7, LIFT_KEY = 8,
@@ -72,9 +90,8 @@ enum BleState { BLE_SEARCHING, BLE_CONNECTING, BLE_CONNECTED, BLE_RETRYING };
 // Forward declarations
 void updateBatteryChargeAnimation();
 
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len);
-void onEspNowSend(const wifi_tx_info_t *, esp_now_send_status_t status);
-void bluetooth();
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len);
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status);
 
 constexpr uint8_t ESPNOW_CHANNEL = 1;
 const uint8_t ESPNOW_LMK[16] = {0x41,0x69,0x72,0x52,0x69,0x64,0x65,0x2D,0x32,0x30,0x32,0x36,0x2D,0x4B,0x31,0x21};
@@ -346,6 +363,10 @@ void handleManualValves();
 void compressorMenu();
 void drawCompressorValue(uint8_t row, bool selected);
 void saveCompressorThreshold(uint8_t which);
+void sendSettingsUpdate();
+void sendCalibrationUpdate();
+void loadCalibrationReference(uint8_t sensor);
+void applyControllerSettings();
 void transitionTo(uint8_t newPage, uint8_t newCursor = 0);
 
 Preferences prefs;
@@ -355,11 +376,23 @@ uint32_t lastControllerPacketMs = 0;
 uint32_t lastDiscoveryMs = 0;
 PressurePacket receivedPressure = {};
 volatile bool telemetryPending = false;
+SettingsFrame receivedSettings = {};
+volatile bool settingsFramePending = false;
+SettingsAckFrame receivedSettingsAck = {};
+volatile bool settingsAckFramePending = false;
+SettingsFrame controllerSettings = {};
+enum SettingsSaveState : uint8_t { SETTINGS_SAVE_IDLE, SETTINGS_SAVE_WAITING, SETTINGS_SAVE_SAVED, SETTINGS_SAVE_FAILED, SETTINGS_SAVE_TIMEOUT, CAL_SAVE_INPUT, CAL_SAVE_RANGE, CAL_SAVE_NVS, CAL_SAVE_ADC };
+SettingsSaveState settingsSaveState = SETTINGS_SAVE_IDLE;
+uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
+bool settingsSavePending = false;
+bool controllerSettingsLoaded = false;
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
-const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
+char preset[3][13] = {"PARK", "DRIVE", "LIFT"};
 float pressure[5] = {NAN,NAN,NAN,NAN,NAN};
 uint16_t target[3][4]={{20,20,20,20},{55,55,55,55},{80,80,80,80}};
 bool linked=false, scanning=false, sleepMode=false;
+volatile bool discoveryConfirmPending = false;
+volatile uint32_t discoveryConfirmAtMs = 0;
 bool manualMode=false;
 
 // The historical BLE state labels are retained for the on-screen connection
@@ -367,6 +400,7 @@ bool manualMode=false;
 BleState bleState = BLE_SEARCHING;
 volatile bool telemetry=false;
 uint8_t page=0, cursor=0, active=0, editPreset=0, editWheel=0, calSensor=0, brightness=100;
+bool nameEditMode=false;uint8_t nameCursor=0;
 // These two settings are independent from the screen backlight. They are
 // saved in flash so the chosen LED level and beep level survive a restart.
 uint8_t ledBrightness=100, buzzerVolume=70;
@@ -467,15 +501,15 @@ uint8_t buzzerDuty() {
 }
 
 void startBeep(uint16_t frequencyHz, uint16_t durationMs) {
-  ledcWriteTone(BUZZER_PIN, frequencyHz);
-  ledcWrite(BUZZER_PIN, buzzerDuty());
+  ledcWriteTone(0, frequencyHz);
+  ledcWrite(0, buzzerDuty());
   buzzerOffMs = millis() + durationMs;
 }
 
 void updateBuzzer() {
   const uint32_t now = millis();
   if (buzzerOffMs != 0 && (int32_t)(now - buzzerOffMs) >= 0) {
-    ledcWriteTone(BUZZER_PIN, 0);
+    ledcWriteTone(0, 0);
     buzzerOffMs = 0;
   }
 }
@@ -490,12 +524,12 @@ void updateButtonLights(bool force) {
     // Start the MANUAL lamp immediately on a mode change. The regular loop
     // then continues the smooth breathing animation from this visible state.
     const uint8_t maximum = presetLedDuty();
-    ledcWrite(PRESET_LED_PIN, 0);
-    ledcWrite(MANUAL_LED_PIN, maximum / 10U);
+    ledcWrite(2, 0);
+    ledcWrite(1, maximum / 10U);
   } else {
-    ledcWrite(MANUAL_LED_PIN, 0);
+    ledcWrite(1, 0);
     // A completed preset must leave its indicator off, not steadily lit.
-    if (!presetRunActive && !presetLedConfirming) ledcWrite(PRESET_LED_PIN, 0);
+    if (!presetRunActive && !presetLedConfirming) ledcWrite(2, 0);
   }
 }
 
@@ -507,7 +541,7 @@ void updatePresetLightAnimation() {
   if (presetLedSelfTest) {
     const uint32_t elapsed = now - presetLedSelfTestStartedMs;
     if (elapsed < 1200U) {
-      ledcWrite(PRESET_LED_PIN, ((elapsed / 200U) % 2U) == 0U ? presetLedDuty() : 0);
+      ledcWrite(2, ((elapsed / 200U) % 2U) == 0U ? presetLedDuty() : 0);
     } else {
       presetLedSelfTest = false;
       updateButtonLights(true);
@@ -519,8 +553,8 @@ void updatePresetLightAnimation() {
     // same brightness setting and remain synchronised for the whole mode.
     const bool on = (now % 1600U) < 800U;
     const uint8_t duty = on ? presetLedDuty() : 0;
-    ledcWrite(PRESET_LED_PIN, duty);  // GPIO44
-    ledcWrite(MANUAL_LED_PIN, duty);  // GPIO43
+    ledcWrite(2, duty);  // GPIO44
+    ledcWrite(1, duty);  // GPIO43
     return;
   }
   if (presetRunActive) {
@@ -528,25 +562,25 @@ void updatePresetLightAnimation() {
     const uint32_t phase = now % 1200U;
     const uint32_t ramp = phase < 600U ? phase : 1200U - phase;
     const uint8_t maximum = presetLedDuty();
-    ledcWrite(PRESET_LED_PIN, maximum / 10U + ((uint16_t)maximum * 9U * ramp) / 6000U);
+    ledcWrite(2, maximum / 10U + ((uint16_t)maximum * 9U * ramp) / 6000U);
     return;
   }
   if (presetLedConfirming) {
     const uint32_t elapsed = now - presetLedConfirmStartedMs;
     if (elapsed < 720U) {
       // Three fast on/off flashes: 120 ms bright, then 120 ms dark.
-      ledcWrite(PRESET_LED_PIN, ((elapsed / 120U) % 2U) == 0U ? presetLedDuty() : 0);
+      ledcWrite(2, ((elapsed / 120U) % 2U) == 0U ? presetLedDuty() : 0);
     } else {
       presetLedConfirming = false;
       // The three confirmation flashes are the end indication. Once the
       // valves are closed and the preset is settled, turn this LED off.
-      ledcWrite(PRESET_LED_PIN, 0);
+      ledcWrite(2, 0);
     }
   }
 }
 
 void stopAll() { const uint8_t p[]={0xB1,0x2F}; sendCommand(p,sizeof(p)); }
-void tune(uint8_t w) { if(w>3)return; uint16_t v=target[active][w]; const uint8_t p[]={0xB1,0x40,w,(uint8_t)v,(uint8_t)(v>>8)}; sendCommand(p,sizeof(p)); }
+void tune(uint8_t w) { if(w>3)return; const uint8_t p[]={0xB1,0x45,active,w}; sendCommand(p,sizeof(p)); }
 void choosePreset(uint8_t p) {
   manualMode = false;
   active = p;
@@ -1003,11 +1037,25 @@ void drawEditorWheel(uint8_t index, bool selected) {
   gfx->setCursor(285 - w, y + 6); gfx->print(s);
 }
 
+const char *settingsSaveMessage() {
+  if (settingsSavePending) return "SAVING TO MAIN";
+  if ((int32_t)(settingsSaveUntilMs - millis()) <= 0) return nullptr;
+  if (settingsSaveState == SETTINGS_SAVE_SAVED) return "SAVED TO MAIN";
+  if (settingsSaveState == SETTINGS_SAVE_FAILED) return "SAVE FAILED";
+  if (settingsSaveState == SETTINGS_SAVE_TIMEOUT) return "SAVE NO REPLY";
+  if (settingsSaveState == CAL_SAVE_INPUT) return "INVALID CAL VALUE";
+  if (settingsSaveState == CAL_SAVE_RANGE) return "OFFSET OUT OF RANGE";
+  if (settingsSaveState == CAL_SAVE_NVS) return "NVS WRITE FAILED";
+  if (settingsSaveState == CAL_SAVE_ADC) return "ADC READ FAILED";
+  return nullptr;
+}
+
 void editor() {
   top("EDIT PRESET");
   drawEditorHeader();
   for (uint8_t i = 0; i < 4; ++i) drawEditorWheel(i, i == editWheel);
-  foot("UP/DN value  OK next wheel  BACK menu");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : (nameEditMode ? "UP/DN char  OK next  BACK save" : (controllerSettingsLoaded ? "UP/DN value  OK next wheel  NEXT name  BACK menu" : "WAIT FOR CONTROLLER SETTINGS")));
 }
 
 void drawCalibrationSensor(uint8_t index, bool selected) {
@@ -1025,7 +1073,8 @@ void drawCalibrationSensor(uint8_t index, bool selected) {
 void calibration() {
   top("CALIBRATE");
   for (uint8_t i = 0; i < 5; ++i) drawCalibrationSensor(i, i == calSensor);
-  foot("UP/DN gauge  OK save/next  BACK menu");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : (controllerSettingsLoaded ? "UP/DN ref  OK save/next  BACK menu" : "WAIT FOR CONTROLLER SETTINGS"));
 }
 
 void drawCompressorValue(uint8_t row, bool selected) {
@@ -1045,15 +1094,117 @@ void compressorMenu() {
   top("COMPRESSOR");
   drawCompressorValue(0, compressorRow == 0);
   drawCompressorValue(1, compressorRow == 1);
-  foot("UP/DN value  OK row  BACK menu");
+  const char *message = settingsSaveMessage();
+  foot(message ? message : "UP/DN value  OK row  BACK menu");
 }
 
-void saveCompressorThreshold(uint8_t which) {
-  // B1 42 selector value-low value-high. selector 0 is the turn-on pressure;
-  // selector 1 is the turn-off pressure. The controller saves it in NVS.
-  const uint16_t value10 = which == 0 ? compressorOnBar10 : compressorOffBar10;
-  const uint8_t p[] = {0xB1, 0x42, which, (uint8_t)value10, (uint8_t)(value10 >> 8)};
-  sendCommand(p, sizeof(p));
+void saveCompressorThreshold(uint8_t) { sendSettingsUpdate(); }
+
+void sendSettingsUpdate() {
+  if (!controllerSettingsLoaded || !linked) return;
+  uint8_t packet[50] = {0xB1, 0x43};
+  size_t at = 2;
+  for (uint8_t i = 0; i < 4; ++i, at += 2) { packet[at] = controllerSettings.wheelLimitDbar[i] & 0xFF; packet[at + 1] = controllerSettings.wheelLimitDbar[i] >> 8; }
+  const uint16_t fixed[] = {controllerSettings.tankLimitDbar, controllerSettings.compressorOnDbar,
+    controllerSettings.targetToleranceDbar, controllerSettings.autoTimeoutSec,
+    controllerSettings.compressorMaxRunSec, controllerSettings.manualTimeoutMs};
+  for (uint8_t i = 0; i < 6; ++i, at += 2) { packet[at] = fixed[i] & 0xFF; packet[at + 1] = fixed[i] >> 8; }
+  for (uint8_t p = 0; p < 3; ++p) for (uint8_t w = 0; w < 4; ++w, at += 2) {
+    packet[at] = target[p][w] & 0xFF; packet[at + 1] = target[p][w] >> 8;
+  }
+  const uint32_t checksum = checkBytes(packet, 46);
+  memcpy(&packet[46], &checksum, sizeof(checksum));
+  sendCommand(packet, sizeof(packet));
+  settingsSavePending = true;
+  settingsSaveState = SETTINGS_SAVE_WAITING;
+  settingsSaveDeadlineMs = millis() + 1500U;
+}
+
+void sendPresetNameUpdate(){uint8_t packet[19]={0xB1,0x46,editPreset};memcpy(&packet[3],preset[editPreset],12);const uint32_t sum=checkBytes(packet,15);memcpy(&packet[15],&sum,4);sendCommand(packet,sizeof(packet));}
+void cycleNameChar(int8_t delta){static const char alphabet[]=" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";char &ch=preset[editPreset][nameCursor];const char *at=strchr(alphabet,ch);int pos=at?(int)(at-alphabet):0;const int count=(int)sizeof(alphabet)-1;pos=(pos+delta+count)%count;ch=alphabet[pos];}
+
+void sendCalibrationUpdate() {
+  if (!controllerSettingsLoaded || !linked) {
+    settingsSavePending = false;
+    settingsSaveState = SETTINGS_SAVE_FAILED;
+    settingsSaveUntilMs = millis() + 1400U;
+    if (page == 5) calibration();
+    return;
+  }
+  const uint8_t packet[] = {0xB1, 0x41, calSensor, (uint8_t)calValue, (uint8_t)(calValue >> 8)};
+  sendCommand(packet, sizeof(packet));
+  settingsSavePending = true;
+  settingsSaveState = SETTINGS_SAVE_WAITING;
+  settingsSaveDeadlineMs = millis() + 1500U;
+}
+
+void loadCalibrationReference(uint8_t sensor) {
+  if (sensor >= 5) return;
+  const uint16_t maximum = sensor == 4 ? 150 : 100;
+  if (controllerSettingsLoaded && (controllerSettings.calibratedMask & (1U << sensor))) {
+    calValue = controllerSettings.calibrationReferenceDbar[sensor];
+  } else if (!isnan(pressure[sensor])) {
+    calValue = (uint16_t)constrain((int)lroundf(pressure[sensor] * 10.0f), 0, maximum);
+  } else {
+    calValue = 0;
+  }
+  if (calValue > maximum) calValue = maximum;
+}
+
+void applyControllerSettings() {
+  if (!settingsFramePending) return;
+  SettingsFrame snapshot;
+  noInterrupts();
+  memcpy(&snapshot, &receivedSettings, sizeof(snapshot));
+  settingsFramePending = false;
+  interrupts();
+  if (snapshot.marker != 0xA2 || snapshot.version != 2 ||
+      snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
+  controllerSettings = snapshot;
+  memcpy(target, snapshot.presetDbar, sizeof(target));
+  memcpy(preset,snapshot.presetNames,sizeof(preset));
+  compressorOnBar10 = snapshot.compressorOnDbar;
+  compressorOffBar10 = snapshot.tankLimitDbar;
+  controllerSettingsLoaded = true;
+  if (page == 4) editor();
+  else if (page == 5) calibration();
+  else if (page == 10) compressorMenu();
+}
+
+void serviceSettingsSaveFeedback() {
+  bool redraw = false;
+  if (settingsAckFramePending) {
+    SettingsAckFrame ack;
+    noInterrupts();
+    memcpy(&ack, &receivedSettingsAck, sizeof(ack));
+    settingsAckFramePending = false;
+    interrupts();
+    if (ack.marker == 0xA3 && (ack.opcode == 0x43 || ack.opcode == 0x41)) {
+      settingsSavePending = false;
+      if (ack.opcode == 0x41 && ack.status == 2) settingsSaveState = CAL_SAVE_INPUT;
+      else if (ack.opcode == 0x41 && ack.status == 3) settingsSaveState = CAL_SAVE_RANGE;
+      else if (ack.opcode == 0x41 && ack.status == 4) settingsSaveState = CAL_SAVE_NVS;
+      else if (ack.opcode == 0x41 && ack.status == 5) settingsSaveState = CAL_SAVE_ADC;
+      else settingsSaveState = ack.status == 1 ? SETTINGS_SAVE_SAVED : SETTINGS_SAVE_FAILED;
+      settingsSaveUntilMs = millis() + 1800U;
+      redraw = true;
+    }
+  }
+  const uint32_t now = millis();
+  if (settingsSavePending && (int32_t)(now - settingsSaveDeadlineMs) >= 0) {
+    settingsSavePending = false;
+    settingsSaveState = SETTINGS_SAVE_TIMEOUT;
+    settingsSaveUntilMs = now + 1400U;
+    redraw = true;
+  } else if (settingsSaveState != SETTINGS_SAVE_IDLE && (int32_t)(now - settingsSaveUntilMs) >= 0) {
+    settingsSaveState = SETTINGS_SAVE_IDLE;
+    redraw = true;
+  }
+  if (redraw) {
+    if (page == 10) compressorMenu();
+    else if (page == 5) calibration();
+    else if (page == 4) editor();
+  }
 }
 
 void transitionTo(uint8_t newPage, uint8_t newCursor) {
@@ -1232,8 +1383,8 @@ bool addControllerPeer(const uint8_t *mac) {
   return true;
 }
 
-void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  if (info == nullptr || data == nullptr) return;
+void onEspNowReceive(const uint8_t *mac_addr, const uint8_t *data, int len) {
+  if (mac_addr == nullptr || data == nullptr) return;
 
   // The controller deliberately answers discovery in the clear, then changes
   // this MAC address to the shared encrypted ESP-NOW key.  Complete that
@@ -1241,23 +1392,37 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
   // never receives E1 02 and correctly keeps every valve closed.
   if (len == 2 && data[0] == 0xE1 && data[1] == 0x81) {
     bleState = BLE_CONNECTING;
-    if (addControllerPeer(info->src_addr)) {
-      const EspNowDiscoveryPacket confirm = {0xE1, 0x02};
-      esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&confirm), sizeof(confirm));
+    if (addControllerPeer(mac_addr)) {
+      // The controller switches to its encrypted peer after its clear reply
+      // has had time to leave the radio. Delay our encrypted confirmation so
+      // it arrives after that switch, not during the open-peer window.
+      discoveryConfirmAtMs = millis() + 250U;
+      discoveryConfirmPending = true;
     }
     return;
   }
 
+  if (!controllerPeerKnown || memcmp(controllerMac, mac_addr, 6) != 0) return;
+  if (len == (int)sizeof(SettingsAckFrame) && data[0] == 0xA3 && (data[1] == 0x43 || data[1] == 0x41)) {
+    memcpy(&receivedSettingsAck, data, sizeof(receivedSettingsAck));
+    settingsAckFramePending = true;
+    lastControllerPacketMs = millis();
+    return;
+  }
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    memcpy(&receivedSettings, data, sizeof(receivedSettings));
+    settingsFramePending = true;
+    lastControllerPacketMs = millis();
+    return;
+  }
   if (len != (int)sizeof(PressurePacket) || data[0] != 0xA1) return;
-  // The callback only copies a complete telemetry frame. Drawing and valve
-  // decisions remain in loop(), outside Wi-Fi's callback task.
-  if (!controllerPeerKnown || memcmp(controllerMac, info->src_addr, 6) != 0) return;
+  // The callback only copies complete frames. Drawing remains in loop().
   memcpy(&receivedPressure, data, sizeof(receivedPressure));
   lastControllerPacketMs = millis();
   telemetryPending = true;
 }
 
-void onEspNowSend(const wifi_tx_info_t *, esp_now_send_status_t status) {
+void onEspNowSend(const uint8_t *, esp_now_send_status_t status) {
   if (status != ESP_NOW_SEND_SUCCESS && linked) {
     linked = false;
     bleState = BLE_RETRYING;
@@ -1289,6 +1454,11 @@ void sendDiscovery() {
 
 void serviceEspNow() {
   const uint32_t now = millis();
+  if (discoveryConfirmPending && (int32_t)(now - discoveryConfirmAtMs) >= 0) {
+    discoveryConfirmPending = false;
+    const EspNowDiscoveryPacket confirm = {0xE1, 0x02};
+    esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&confirm), sizeof(confirm));
+  }
   const bool fresh = controllerPeerKnown && (now - lastControllerPacketMs < CONTROLLER_TIMEOUT_MS);
   if (fresh != linked) {
     linked = fresh;
@@ -1299,11 +1469,11 @@ void serviceEspNow() {
       // peer record as well, so its clear E1 81 discovery reply is never
       // tied to stale encryption state. The next reply rebuilds the peer and
       // sends encrypted E1 02 exactly like the first connection.
-      if (controllerPeerKnown) {
-        esp_now_del_peer(controllerMac);
-        controllerPeerKnown = false;
-        memset(controllerMac, 0, sizeof(controllerMac));
-      }
+      if (controllerPeerKnown) esp_now_del_peer(controllerMac);
+      controllerPeerKnown = false;
+      discoveryConfirmPending = false;
+      controllerSettingsLoaded = false;
+      memset(controllerMac, 0, sizeof(controllerMac));
       lastControllerPacketMs = 0;
       // Do not wait for the normal 500 ms discovery period after a controller
       // disappears. Start a new clear broadcast handshake immediately; this
@@ -1323,6 +1493,8 @@ void serviceEspNow() {
     const EspNowDiscoveryPacket heartbeat = {0xE1, 0x02};
     esp_now_send(controllerMac, reinterpret_cast<const uint8_t *>(&heartbeat), sizeof(heartbeat));
   }
+  applyControllerSettings();
+  serviceSettingsSaveFeedback();
   if (telemetryPending) {
     noInterrupts();
     PressurePacket packet = receivedPressure;
@@ -1414,11 +1586,7 @@ Key key(){
   return NONE;
 }
 
-void saveTarget(){
-  char k[8];
-  snprintf(k,sizeof(k),"p%uw%u",editPreset,editWheel);
-  prefs.putUShort(k,target[editPreset][editWheel]);
-}
+void saveTarget(){ sendSettingsUpdate(); }
 
 void handleModeButton(){
   const bool down = digitalRead(BTN_MODE) == LOW;
@@ -1665,7 +1833,7 @@ void action(Key k){
       else if(cursor==1){editPreset=editWheel=0; transitionTo(4);}
       else if(cursor==2){
         calSensor=0;
-        calValue=isnan(pressure[0]) ? 0 : (uint16_t)constrain((int)lroundf(pressure[0]*10.0f),0,150);
+        loadCalibrationReference(calSensor);
         transitionTo(5);
       }
       else if(cursor==3) {transitionTo(6, 0);}
@@ -1687,7 +1855,10 @@ void action(Key k){
     if(k==KEYOK){choosePreset(cursor); transitionTo(0);}
     else if(k==BACK){transitionTo(2, 0);}
   } else if(page==4){
-    if (k == UP && target[editPreset][editWheel] < 150) {
+    if (!controllerSettingsLoaded) return;
+    if(k==NEXT){if(nameEditMode)sendPresetNameUpdate();nameEditMode=!nameEditMode;nameCursor=0;render();return;}
+    if(nameEditMode){if(k==UP)cycleNameChar(1);else if(k==DOWN)cycleNameChar(-1);else if(k==KEYOK)nameCursor=(nameCursor+1)%12;else if(k==BACK){sendPresetNameUpdate();nameEditMode=false;render();return;}render();return;}
+    if (k == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) {
       target[editPreset][editWheel] += 1;
       saveTarget();
       drawEditorWheel(editWheel, true);
@@ -1715,7 +1886,9 @@ void action(Key k){
     }
     if (k == BACK) { transitionTo(2, 1); }
   } else if(page==5){
-    if (k == UP && calValue < 150) {
+    if (!controllerSettingsLoaded) return;
+    const uint16_t calibrationMaximum = calSensor == 4 ? 150 : 100;
+    if (k == UP && calValue < calibrationMaximum) {
       calValue++;
       drawCalibrationSensor(calSensor, true);
       return;
@@ -1727,11 +1900,10 @@ void action(Key k){
     }
     if (k == KEYOK) {
       stopAll();
-      const uint8_t p[]={0xB1,0x41,calSensor,(uint8_t)calValue,(uint8_t)(calValue>>8)};
-      sendCommand(p,sizeof(p));
+      sendCalibrationUpdate();
       const uint8_t oldSensor = calSensor;
       calSensor = (calSensor + 1) % 5;
-      calValue = isnan(pressure[calSensor]) ? 0 : (uint16_t)constrain((int)lroundf(pressure[calSensor] * 10.0f), 0, 150);
+      loadCalibrationReference(calSensor);
       drawCalibrationSensor(oldSensor, false);
       drawCalibrationSensor(calSensor, true);
       return;
@@ -1739,15 +1911,17 @@ void action(Key k){
     if(k==BACK){transitionTo(2, 2);}
   } else if(page==10) {
     if (k == UP) {
+      if (!controllerSettingsLoaded) return;
       uint16_t &selected = compressorRow == 0 ? compressorOnBar10 : compressorOffBar10;
       const uint16_t maximum = compressorRow == 0 ? compressorOffBar10 - 1 : 150;
-      if (selected < maximum) { selected++; prefs.putUShort(compressorRow == 0 ? "compOn" : "compOff", selected); saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
+      if (selected < maximum) { selected++; if (compressorRow == 0) controllerSettings.compressorOnDbar = selected; else controllerSettings.tankLimitDbar = selected; saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
       return;
     }
     if (k == DOWN) {
+      if (!controllerSettingsLoaded) return;
       uint16_t &selected = compressorRow == 0 ? compressorOnBar10 : compressorOffBar10;
       const uint16_t minimum = compressorRow == 0 ? 0 : compressorOnBar10 + 1;
-      if (selected > minimum) { selected--; prefs.putUShort(compressorRow == 0 ? "compOn" : "compOff", selected); saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
+      if (selected > minimum) { selected--; if (compressorRow == 0) controllerSettings.compressorOnDbar = selected; else controllerSettings.tankLimitDbar = selected; saveCompressorThreshold(compressorRow); drawCompressorValue(compressorRow, true); }
       return;
     }
     if (k == KEYOK) {
@@ -1812,7 +1986,7 @@ void action(Key k){
     else if(k==BACK){transitionTo(6, 2);}
     prefs.putUChar("volume",buzzerVolume);
     // Apply the new level immediately if a warning beep is still sounding.
-    if (buzzerOffMs != 0) ledcWrite(BUZZER_PIN, buzzerDuty());
+    if (buzzerOffMs != 0) ledcWrite(0, buzzerDuty());
   }
   render();
 }
@@ -1836,13 +2010,16 @@ void setup(){
   delay(2000);
   digitalWrite(PRESET_LED_PIN, LOW);
   // Attach GPIO18 to a PWM tone generator for the passive piezo buzzer.
-  ledcAttach(BUZZER_PIN, 2400, 8);
-  ledcWriteTone(BUZZER_PIN, 0);
+  ledcSetup(0, 2400, 8);
+  ledcAttachPin(BUZZER_PIN, 0);
+  ledcWriteTone(0, 0);
   // PWM lets both ordinary white LEDs use the menu-selected brightness.
-  ledcAttach(MANUAL_LED_PIN, 5000, 8);
-  ledcWrite(MANUAL_LED_PIN, 0);
-  ledcAttach(PRESET_LED_PIN, 5000, 8);
-  ledcWrite(PRESET_LED_PIN, 0);
+  ledcSetup(1, 5000, 8);
+  ledcAttachPin(MANUAL_LED_PIN, 1);
+  ledcWrite(1, 0);
+  ledcSetup(2, 5000, 8);
+  ledcAttachPin(PRESET_LED_PIN, 2);
+  ledcWrite(2, 0);
   presetLedSelfTestStartedMs = millis();
   analogReadResolution(12);
   analogSetPinAttenuation(BATTERY_ADC, ADC_11db);
@@ -1861,20 +2038,13 @@ void setup(){
   if(ledBrightness<10||ledBrightness>100)ledBrightness=100;
   buzzerVolume=prefs.getUChar("volume",70);
   if(buzzerVolume<10||buzzerVolume>100)buzzerVolume=70;
-  compressorOnBar10=prefs.getUShort("compOn",110);
-  compressorOffBar10=prefs.getUShort("compOff",145);
-  // A bad or erased flash value must never make the compressor thresholds
-  // overlap; restore the safe 11.0 / 14.5 bar defaults in that case.
-  if (compressorOnBar10 >= compressorOffBar10 || compressorOffBar10 > 150) {
-    compressorOnBar10=110;
-    compressorOffBar10=145;
-  }
+  // Vehicle settings are loaded from the controller after the encrypted
+  // ESP-NOW link is established. These values only keep the menu drawable
+  // while the controller is still connecting.
+  compressorOnBar10=120;
+  compressorOffBar10=150;
   analogWrite(LCD_BL,(uint16_t)brightness*255/100);
-  for(uint8_t a=0;a<3;a++)for(uint8_t b=0;b<4;b++){
-    char k[8];
-    snprintf(k,sizeof(k),"p%uw%u",a,b);
-    target[a][b]=prefs.getUShort(k,target[a][b]);
-  }
+  // Preset pressures are owned and saved by the controller.
   setupEspNow();
   usbPowerPresent = usbPowerConnected();
   lastPowerSourceCheckMs = millis();

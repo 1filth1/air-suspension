@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Air Suspension · Web Flasher</title>
+<style>
+:root{color-scheme:dark;--bg:#101722;--panel:#192434;--line:#2e4057;--muted:#9aacc2;--text:#edf4fc;--accent:#71b7ff;--warn:#ffcf7a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#1d3452,var(--bg) 42%);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Arial,sans-serif}
+main{max-width:900px;margin:48px auto;padding:0 20px}.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px;box-shadow:0 20px 60px #0004}
+h1{margin:0 0 4px;font-size:30px}p{color:var(--muted)}label{display:block;margin:18px 0 7px;font-weight:650}
+select,input[type=file]{width:100%;background:#0f1824;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px}.notice{padding:13px 15px;border-radius:10px;background:#102235;border:1px solid #2f5d84;color:#cfe7ff}
+.warning{padding:13px 15px;border-radius:10px;background:#332814;border:1px solid #735a2e;color:#ffe1a8}
+button,.button{border:0;border-radius:10px;background:var(--accent);color:#071421;padding:12px 18px;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}
+button:disabled{opacity:.45;cursor:not-allowed}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:20px}
+#status{white-space:pre-wrap;background:#0b111a;border:1px solid var(--line);border-radius:10px;padding:14px;min-height:90px;margin-top:20px;font:13px/1.5 ui-monospace,Consolas,monospace;color:#d1e3f7}
+progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small{color:var(--muted)}a{color:var(--accent)}
+@media(max-width:640px){.row{grid-template-columns:1fr}main{margin:20px auto}.card{padding:18px}}
+</style>
+
+</head>
+<body>
+<main>
+<div class="card">
+<h1>Air Suspension · Web Flasher</h1>
+<p>Выбери выпуск и устройство — флешер сам загрузит нужный HEX-файл из GitHub-релиза. Затем подключи плату через USB.</p>
+<div class="notice">Для прошивки нужен Chrome или Edge на HTTPS/localhost и USB-кабель с передачей данных. Пневматическую систему отключи на время обновления.</div>
+<div class="row">
+<div><label for="release">Релиз</label><select id="release"></select></div>
+<div><label for="device">Устройство</label><select id="device">
+<option value="controller">Контроллер · ESP32 DevKit V1</option>
+<option value="t-display">Пульт · ESP32-S3 T-Display</option>
+<option value="remote-2inch">Пульт · ESP32, экран 2″ ST7789</option>
+<option value="keychain">Брелок · TTGO T-Display</option>
+</select></div>
+</div>
+<div class="actions"><a id="releaseLink" class="button" target="_blank" rel="noopener">Открыть страницу релиза</a></div>
+<div class="notice" style="margin-top:16px"><strong id="assetName">Загружаю файл прошивки…</strong></div>
+<div class="warning" style="margin-top:16px">Обычная прошивка сохраняет настройки контроллера в NVS. Отметка ниже полностью стирает flash, включая сохранённые профили и калибровки.</div>
+<label style="font-weight:500"><input id="eraseAll" type="checkbox"> Полностью стереть flash перед записью</label>
+<div class="actions"><button id="flash" disabled>Подключить плату и прошить</button><span id="chip"></span></div>
+<progress id="progress" value="0" max="100"></progress>
+<pre id="status">Загружаю каталог релизов…</pre>
+</div>
+<p><small>Исходный код и схема: <a href="https://github.com/1filth1/air-suspension">github.com/1filth1/air-suspension</a>. Для локального запуска: python -m http.server 8000 в каталоге webflasher.</small></p>
+</main>
+<script type="module">
+let esptoolApi = null;
+let esptoolLoadError = null;
+const esptoolReady = import("https://unpkg.com/esptool-js@0.7.1/bundle.js")
+  .then((api) => { esptoolApi = api; })
+  .catch((error) => { esptoolLoadError = error; });
+const $ = (id) => document.getElementById(id);
+const releaseSelect = $("release"), deviceSelect = $("device");
+const status = $("status"), flashButton = $("flash"), progress = $("progress");
+let releases = [], firmwareText = null, firmwareKey = "", loadToken = 0;
+const devices = {
+  controller: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-controller.hex" },
+  "t-display": { chip: "ESP32-S3", flashSize: "8MB", asset: "air-suspension-remote-t-display.hex" },
+  "remote-2inch": { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-remote-2inch.hex" },
+  keychain: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-keychain.hex" }
+};
+function say(message) { status.textContent = message; }
+function selectedRelease() { return releases.find((item) => item.tag === releaseSelect.value); }
+function updateRelease() {
+  const release = selectedRelease(), device = devices[deviceSelect.value];
+  $("releaseLink").href = release?.url || "#";
+  $("assetName").textContent = release ? "Нужный файл: " + device.asset : "";
+  const key = release ? release.tag + ":" + deviceSelect.value : "";
+  if (key !== firmwareKey) {
+    firmwareKey = key;
+    firmwareText = null;
+    if (release) loadFirmware(release, deviceSelect.value);
+  }
+  flashButton.disabled = !release || !firmwareText || !esptoolApi;
+}
+async function loadFirmware(release, deviceId) {
+  const token = ++loadToken;
+  const device = devices[deviceId];
+  const asset = release.assets?.[deviceId] || device.asset;
+  const url = new URL(
+    "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
+    document.baseURI
+  );
+  $("assetName").textContent = "Скачиваю " + asset + "…";
+  flashButton.disabled = true;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("GitHub вернул HTTP " + response.status);
+    const text = await response.text();
+    if (token !== loadToken) return;
+    if (!text.trimStart().startsWith(":") || !text.includes(String.fromCharCode(10))) throw new Error("Файл релиза не похож на Intel HEX.");
+    firmwareText = text;
+    $("assetName").textContent = "Прошивка загружена: " + asset;
+    say("Загружена прошивка " + release.label + " · " + asset + ". Можно подключать плату.");
+    flashButton.disabled = !esptoolApi;
+  } catch (error) {
+    if (token !== loadToken) return;
+    $("assetName").textContent = "Не удалось загрузить " + asset + ".";
+    say("Ошибка загрузки прошивки: " + (error?.message || error) + String.fromCharCode(10) + "Проверь доступность файла в релизе.");
+  }
+}
+async function loadCatalog() {
+  try {
+    const response = await fetch("./releases.json", { cache: "no-store" });
+    if (!response.ok) throw new Error("Каталог не найден");
+    releases = (await response.json()).releases || [];
+    releaseSelect.replaceChildren(...releases.map((item) => new Option(item.label || item.tag, item.tag)));
+    if (!releases.length) throw new Error("В каталоге пока нет релизов.");
+    await esptoolReady;
+    updateRelease();
+    if (esptoolLoadError) say("Не удалось загрузить модуль прошивки: " + esptoolLoadError.message);
+  } catch (error) { say("Не удалось загрузить каталог: " + error.message); }
+}
+releaseSelect.addEventListener("change", updateRelease);
+deviceSelect.addEventListener("change", updateRelease);
+flashButton.addEventListener("click", async () => {
+  const release = selectedRelease(), device = devices[deviceSelect.value];
+  if (!firmwareText || !release) return;
+  let port, transport;
+  flashButton.disabled = true;
+  progress.value = 0;
+  try {
+    if (!("serial" in navigator)) throw new Error("Этот браузер не поддерживает Web Serial. Открой страницу в Chrome или Edge.");
+    if (!esptoolApi) throw new Error("Не удалось загрузить модуль прошивки: " + (esptoolLoadError?.message || "повтори обновление страницы."));
+    const { ESPLoader, Transport, parseIntelHex } = esptoolApi;
+    port = await navigator.serial.requestPort();
+    transport = new Transport(port, true);
+    const loader = new ESPLoader({
+      transport, baudrate: 115200,
+      terminal: { clean() {}, writeLine: (line) => say(line), write: (line) => status.append(line) }
+    });
+    say("Подключаюсь к плате…");
+    const chipName = await loader.main();
+    $("chip").textContent = "Обнаружена плата: " + chipName;
+    if (!chipName.toUpperCase().includes(device.chip)) {
+      throw new Error("Выбрана прошивка для " + device.chip + ", подключена " + chipName + ".");
+    }
+    const segments = parseIntelHex(firmwareText);
+    if (!segments.length) throw new Error("В HEX-файле нет областей для записи.");
+    say("Прошиваю " + release.label + " · " + device.asset);
+    await loader.writeFlash({
+      fileArray: segments,
+      flashMode: "dio",
+      flashFreq: "40m",
+      flashSize: device.flashSize,
+      eraseAll: $("eraseAll").checked,
+      compress: true,
+      reportProgress: (_index, written, total) => {
+        progress.value = total ? Math.round(written / total * 100) : 0;
+      }
+    });
+    await loader.after("hard_reset");
+    say("Готово. Плата перезапущена.");
+  } catch (error) {
+    say("Ошибка прошивки: " + (error?.message || error));
+  } finally {
+    if (transport) { try { await transport.disconnect(); } catch {} }
+    flashButton.disabled = !firmwareText || !selectedRelease() || !esptoolApi;
+  }
+});
+loadCatalog();
+</script>
+</body>
+</html>

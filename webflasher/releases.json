@@ -1,0 +1,40 @@
+{
+  "releases": [
+    {
+      "tag": "v0.1.0-rc.3",
+      "label": "0.1.0-rc.3",
+      "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.3",
+      "assets": {
+        "controller": "air-suspension-controller.hex",
+        "t-display": "air-suspension-remote-t-display.hex",
+        "remote-2inch": "air-suspension-remote-2inch.hex",
+        "keychain": "air-suspension-keychain.hex"
+      }
+    },
+    {
+      "tag": "v0.1.0-rc.2",
+      "label": "0.1.0-rc.2",
+      "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.2",
+      "assets": {
+        "controller": "air-suspension-controller.hex",
+        "t-display": "air-suspension-remote-t-display.hex",
+        "remote-2inch": "air-suspension-remote-2inch.hex"
+      }
+    },
+    {
+      "tag": "v0.1.0-rc.1",
+      "label": "0.1.0-rc.1",
+      "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.1",
+      "assets": {
+        "controller": "air-suspension-controller.hex",
+        "t-display": "air-suspension-remote-t-display.hex",
+        "remote-2inch": "air-suspension-remote-2inch.hex"
+      },
+      "assetIds": {
+        "controller": 762006738,
+        "remote-2inch": 762006739,
+        "t-display": 762006737
+      }
+    }
+  ]
+}
