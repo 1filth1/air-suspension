@@ -32,6 +32,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -297,6 +298,7 @@ static bool controllerSettingsLoaded = false;
 static char presetNames[3][13] = {"PARK", "DRIVE", "LIFT"};
 static uint16_t presetTargets[3][4] = {{20,20,20,20},{55,55,55,55},{80,80,80,80}};
 static uint32_t settingsGeneration = 0;
+static uint32_t lastSettingsRequestMs = 0;
 static uint32_t lastTelemetryMs = 0;
 
 // bar[0..3] are the wheels FL, FR, RL, RR; bar[4] is the tank.
@@ -886,6 +888,8 @@ void loop() {
         memset(controllerMac, 0, sizeof(controllerMac));
       }
       lastControllerPacketMs = 0;
+      controllerSettingsLoaded = false;
+      lastSettingsRequestMs = 0;
       lastDiscoveryMs = now;
       sendDiscovery();
       invalidateAxes();
@@ -902,6 +906,13 @@ void loop() {
   }
 
   applyControllerSettings();
+
+  if (linked && !controllerSettingsLoaded &&
+      (lastSettingsRequestMs == 0 || now - lastSettingsRequestMs >= 750U)) {
+    const uint8_t request[] = {0xB1, 0x42};
+    sendCommand(request, sizeof(request));
+    lastSettingsRequestMs = now;
+  }
 
   if (telemetryPending) {
     noInterrupts();
