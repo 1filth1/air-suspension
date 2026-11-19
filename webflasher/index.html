@@ -80,7 +80,8 @@ async function loadFirmware(release, deviceId) {
   const device = devices[deviceId];
   const asset = release.assets?.[deviceId] || device.asset;
   const assetLabel = asset.split("/").pop();
-  const url = /^https?:\\/\\//i.test(asset)
+  const isAbsoluteUrl = asset.startsWith("https://") || asset.startsWith("http://");
+  const url = isAbsoluteUrl
     ? new URL(asset)
     : new URL(
         "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
