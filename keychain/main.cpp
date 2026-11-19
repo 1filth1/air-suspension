@@ -242,6 +242,30 @@ struct Telemetry {
 } __attribute__((packed));
 static_assert(sizeof(Telemetry) == 22, "telemetry layout changed");
 
+struct SettingsFrame {
+  uint8_t marker, version;
+  uint32_t generation;
+  uint16_t wheelLimitDbar[4];
+  uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar, compressorOnDbar, targetToleranceDbar;
+  uint16_t autoTimeoutSec, compressorMaxRunSec, manualTimeoutMs;
+  uint8_t calibratedMask;
+  uint16_t calibrationReferenceDbar[5];
+  int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
+  uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 114, "settings frame layout changed");
+
+static uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) {
+    value = (value << 5) | (value >> 27);
+    value ^= bytes[i];
+  }
+  return value;
+}
+
 static const uint8_t ESPNOW_CHANNEL = 1;
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Same key as the controller and the other remotes. See README: this belongs in
@@ -267,6 +291,12 @@ static bool discoveryConfirmPending = false;
 
 static Telemetry receivedTelemetry;
 static volatile bool telemetryPending = false;
+static SettingsFrame receivedSettings = {};
+static volatile bool settingsPending = false;
+static bool controllerSettingsLoaded = false;
+static char presetNames[3][13] = {"PARK", "DRIVE", "LIFT"};
+static uint16_t presetTargets[3][4] = {{20,20,20,20},{55,55,55,55},{80,80,80,80}};
+static uint32_t settingsGeneration = 0;
 static uint32_t lastTelemetryMs = 0;
 
 // bar[0..3] are the wheels FL, FR, RL, RR; bar[4] is the tank.
@@ -366,8 +396,17 @@ static void handleEspNowFrame(const uint8_t *mac, const uint8_t *data, int len) 
   }
 
   if (!controllerPeerKnown || memcmp(controllerMac, mac, 6) != 0) return;
-  // Telemetry is the only encrypted frame this remote needs; settings frames
-  // are ignored so a v3 controller does not confuse the parser.
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    SettingsFrame frame;
+    memcpy(&frame, data, sizeof(frame));
+    if (frame.version == 2 &&
+        frame.check == checkBytes((const uint8_t *)&frame, offsetof(SettingsFrame, check))) {
+      memcpy(&receivedSettings, &frame, sizeof(frame));
+      settingsPending = true;
+      lastControllerPacketMs = millis();
+    }
+    return;
+  }
   if (len != (int)sizeof(Telemetry) || data[0] != 0xA1) return;
   memcpy(&receivedTelemetry, data, sizeof(receivedTelemetry));
   lastControllerPacketMs = millis();
@@ -593,6 +632,60 @@ static void drawBattery(uint8_t percent, bool force) {
 }
 #endif
 
+static void applyControllerSettings() {
+  if (!settingsPending) return;
+  SettingsFrame frame;
+  noInterrupts();
+  memcpy(&frame, &receivedSettings, sizeof(frame));
+  settingsPending = false;
+  interrupts();
+  if (frame.marker != 0xA2 || frame.version != 2 ||
+      frame.check != checkBytes((const uint8_t *)&frame, offsetof(SettingsFrame, check))) return;
+  for (uint8_t p = 0; p < 3; ++p) {
+    if (frame.presetNames[p][12] != '\0' || strnlen(frame.presetNames[p], 12) == 0) return;
+  }
+  memcpy(presetNames, frame.presetNames, sizeof(presetNames));
+  memcpy(presetTargets, frame.presetDbar, sizeof(presetTargets));
+  settingsGeneration = frame.generation;
+  controllerSettingsLoaded = true;
+}
+
+static void drawPresetFooter(bool force) {
+  static int8_t shownPreset = -1;
+  static bool shownManual = false;
+  static bool shownLoaded = false;
+  static uint32_t rotatedAt = 0;
+  const uint32_t now = millis();
+  if (!manualMode && controllerSettingsLoaded && now - rotatedAt >= 2600U) {
+    shownPreset = (shownPreset + 1) % 3;
+    rotatedAt = now;
+  }
+  const bool changed = force || shownManual != manualMode ||
+                       shownLoaded != controllerSettingsLoaded ||
+                       (!manualMode && controllerSettingsLoaded && shownPreset < 0);
+  static char shownText[32] = "";
+  char text[32] = "";
+  if (manualMode) {
+    snprintf(text, sizeof(text), "MANUAL");
+  } else if (!controllerSettingsLoaded) {
+    snprintf(text, sizeof(text), "%s", linked ? "SYNC SETTINGS..." : "NO CONTROLLER");
+  } else {
+    if (shownPreset < 0) shownPreset = 0;
+    const uint8_t p = (uint8_t)shownPreset;
+    snprintf(text, sizeof(text), "%.6s %.1f/%.1f/%.1f/%.1f",
+      presetNames[p],
+      presetTargets[p][0] / 10.0f, presetTargets[p][1] / 10.0f,
+      presetTargets[p][2] / 10.0f, presetTargets[p][3] / 10.0f);
+  }
+  if (changed || strcmp(text, shownText) != 0) {
+    gfx.fillRect(0, 218, 135, 22, BG);
+    drawText(2, 222, text, controllerSettingsLoaded ? MINT : ORANGE, BG, 1);
+    snprintf(shownText, sizeof(shownText), "%s", text);
+  }
+  shownManual = manualMode;
+  shownLoaded = controllerSettingsLoaded;
+}
+
 static void drawStatusWord(bool force) {
   const char *word = "";
   uint16_t color = SUB;
@@ -729,12 +822,7 @@ static void render(bool full) {
     drawWheelGauge(wheel, full);
   }
   drawSelection(full);
-  static int8_t shownManual = -1;
-  if (full || shownManual != (int8_t)manualMode) {
-    gfx.fillRect(0, 218, 135, 22, BG);
-    if (manualMode) drawText(31, 222, "manual", MINT, BG, 2);
-    shownManual = manualMode;
-  }
+  drawPresetFooter(full);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -812,6 +900,8 @@ void loop() {
     const uint8_t heartbeat[2] = {0xE1, 0x02};
     esp_now_send(controllerMac, heartbeat, sizeof(heartbeat));
   }
+
+  applyControllerSettings();
 
   if (telemetryPending) {
     noInterrupts();
