@@ -1,11 +1,32 @@
 # Air Suspension — Release notes
 
-## Unreleased
+## v0.1.0-rc.6
 
-### Added
-- Added keychain preset selection with short SELECT clicks and preset activation with a short CONFIRM click; holding SELECT still enters manual wheel control.
-- The keychain sends the controller's existing `B1 44` preset command and never stores or edits preset targets locally.
+### Documentation
+- Updated the keychain remote instructions to match the current two-button controls, preset selection and activation, controller settings synchronization, and manual-mode behavior.
+- Clarified that the shared ESP-NOW key is present in the published firmware and that this release candidate is for bench testing only.
+- Corrected the keychain release-workflow and minimum-pressure documentation.
 
+### Firmware and release status
+- No firmware behavior changes are included in this documentation-only RC6 preparation commit; firmware sources are unchanged from the selected base revision.
+- Build and upload the controller, T-Display remote, 2-inch remote, and keychain as one matching release set. Do not publish RC6 until all four builds pass and the firmware set has been bench-tested.
+- This is not a road-validated safety system. Verify sensor calibration, valve polarity, independent pressure protection, timeout behavior, and emergency stop with pneumatic actuators disconnected before any controlled bench test.
+- **Security warning:** the ESP-NOW key is compiled into the firmware and is shared across devices. Anyone who obtains the key can attempt to pair with the controller. Do not treat ESP-NOW encryption as device-specific authentication or deploy this firmware in a vehicle until per-installation keys and an authenticated pairing process are implemented.
+- Automatic target adjustment remains pulse-based; overshoot-then-slow-bleed settling is not implemented.
+- The web flasher's full-erase option clears NVS settings and sensor calibration. Leave it unchecked for normal updates.
+
+## v0.1.0-rc.5
+
+### Keychain remote
+- Added preset selection using a short SELECT press and preset activation using a short CONFIRM press.
+- Added a display indicator for the selected controller-owned preset and its four wheel targets.
+- Holding SELECT enters manual mode; existing manual valve control is retained.
+- Preset targets and names remain authoritative in the controller.
+
+### Notes
+- Preset activation requires a controller connection and synchronized settings.
+- All four firmware targets are included in the release build workflow.
+- Hardware behavior still requires bench testing; this firmware is not road-validated.
 
 ## v0.1.0-rc.4
 
@@ -17,9 +38,8 @@
 
 ### Important notes
 - Install the controller and all remotes from the same RC as one matching firmware set.
-- This update addresses preset synchronization and display only; it does not add preset activation from the keychain.
-- Automatic target adjustment remains pulse-based. The requested overshoot-then-slow-bleed settling strategy is not included in this candidate.
-- This is a bench-test release candidate, not a road-validated safety system. Verify sensor calibration, valve polarity, pressure limits, timeout behavior, and emergency stop with the pneumatic actuators safely isolated before any vehicle use.
+- Automatic target adjustment remains pulse-based. The requested overshoot-then-slow-bleed settling strategy is not included.
+- This is a bench-test release candidate, not a road-validated safety system. Verify sensor calibration, valve polarity, pressure limits, timeout behavior, and emergency stop with the pneumatic actuators disconnected.
 - The web flasher's full-erase option clears NVS settings and sensor calibration. Leave it unchecked for normal updates.
 
 ## v0.1.0-rc.3
@@ -38,5 +58,5 @@
 - Update the controller and all remotes as one matching release set. Older remotes do not understand the version-2 settings frame used for controller-owned preset names.
 - The keychain remote uses the common ESP-NOW telemetry/manual-command subset and does not edit presets.
 - Automatic target adjustment is still pulse-based. The requested overshoot-then-slow-bleed settling strategy is not part of this candidate yet.
-- This is a bench-test release candidate, not a road-validated safety system. Verify sensor calibration, valve polarity, pressure limits, timeout behavior, and emergency stop with the pneumatic actuators safely isolated before any vehicle use.
+- This is a bench-test release candidate, not a road-validated safety system. Verify sensor calibration, valve polarity, pressure limits, timeout behavior, and emergency stop with the pneumatic actuators disconnected.
 - The web flasher's full-erase option clears NVS settings and sensor calibration. Leave it unchecked for normal updates.
