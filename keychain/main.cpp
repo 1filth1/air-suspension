@@ -1,19 +1,17 @@
 // Air Suspension — keychain remote for the TTGO T-Display (ESP32, 1.14" IPS).
 //
 // Board: TTGO T-Display, ESP32, ST7789V 135x240 over 4-wire SPI.
-// Display shows the tank pressure and all four wheel pressures; four buttons
-// raise or lower the front and the rear axle.
+// Display shows the tank and four wheel pressures plus the selected controller preset.
+// SELECT cycles presets; CONFIRM activates one; holding SELECT enters manual mode.
 //
-// The remote speaks only the part of the controller protocol that is identical
-// in the v2 (main) and v3 (release candidate) controller configs, so it works
-// with either firmware:
+// Controller protocol:
 //   E1 01 / E1 81 / E1 02   discovery, encrypted-peer handshake, heartbeat
 //   A1 + float[5] + flags   telemetry, 250 ms
-//   B1 20..27               manual pulse for one wheel: fill/dump
-//   B1 30..33               cancel the manual pulse on one wheel
-//   B1 2F                   stop every valve and the compressor
-// The settings frames (0xA2 / 0xA3 / 0x43 / 0x44 / 0x45) are deliberately not
-// used: they differ between v2 and v3, and this remote does not need them.
+//   A2 SettingsFrame v2    controller-owned preset names and four wheel targets
+//   B1 42                  request settings; B1 44 + preset activates a preset
+//   B1 20..27 / 30..33      manual wheel fill/dump and cancel
+// Preset editing remains on the full-size remotes; this compact remote only
+// selects and activates the controller's saved presets.
 //
 // Safety model, inherited from the controller:
 //   - A manual pulse expires in the controller after manualTimeoutMs (2 s by
@@ -32,6 +30,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -242,6 +241,26 @@ struct Telemetry {
 } __attribute__((packed));
 static_assert(sizeof(Telemetry) == 22, "telemetry layout changed");
 
+struct SettingsFrame {
+  uint8_t marker, version;
+  uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar, compressorOnDbar, targetToleranceDbar;
+  uint16_t autoTimeoutSec, compressorMaxRunSec, manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5];
+  int16_t zeroMilliVolts[5]; char presetNames[3][13]; uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
+static uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) {
+    value = (value << 5) | (value >> 27);
+    value ^= bytes[i];
+  }
+  return value;
+}
+
+
 static const uint8_t ESPNOW_CHANNEL = 1;
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Same key as the controller and the other remotes. See README: this belongs in
@@ -261,11 +280,17 @@ static bool controllerPeerKnown = false;
 static bool linked = false;
 static uint8_t controllerMac[6];
 static uint32_t lastControllerPacketMs = 0;
+static uint32_t lastSettingsRequestMs = 0;
 static uint32_t lastDiscoveryMs = 0;
 static uint32_t discoveryConfirmAtMs = 0;
 static bool discoveryConfirmPending = false;
 
 static Telemetry receivedTelemetry;
+static SettingsFrame receivedSettings = {};
+static volatile bool settingsPending = false;
+static SettingsFrame controllerSettings = {};
+static bool controllerSettingsLoaded = false;
+static uint8_t selectedPreset = 0;
 static volatile bool telemetryPending = false;
 static uint32_t lastTelemetryMs = 0;
 
@@ -309,6 +334,17 @@ static void sendCommand(const uint8_t *payload, size_t length) {
   if (esp_now_send(controllerMac, payload, length) != ESP_OK) {
     linked = false;
   }
+}
+
+static void requestControllerSettings() {
+  const uint8_t request[2] = {0xB1, 0x42};
+  sendCommand(request, sizeof(request));
+}
+
+static void activateSelectedPreset() {
+  if (!controllerSettingsLoaded || !linked) return;
+  const uint8_t command[3] = {0xB1, 0x44, selectedPreset};
+  sendCommand(command, sizeof(command));
 }
 
 static void sendManual(uint8_t wheel, bool fill) {
@@ -366,8 +402,17 @@ static void handleEspNowFrame(const uint8_t *mac, const uint8_t *data, int len) 
   }
 
   if (!controllerPeerKnown || memcmp(controllerMac, mac, 6) != 0) return;
-  // Telemetry is the only encrypted frame this remote needs; settings frames
-  // are ignored so a v3 controller does not confuse the parser.
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    SettingsFrame frame;
+    memcpy(&frame, data, sizeof(frame));
+    if (frame.version == 2 &&
+        frame.check == checkBytes((const uint8_t *)&frame, offsetof(SettingsFrame, check))) {
+      memcpy(&receivedSettings, &frame, sizeof(frame));
+      settingsPending = true;
+      lastControllerPacketMs = millis();
+    }
+    return;
+  }
   if (len != (int)sizeof(Telemetry) || data[0] != 0xA1) return;
   memcpy(&receivedTelemetry, data, sizeof(receivedTelemetry));
   lastControllerPacketMs = millis();
@@ -460,10 +505,15 @@ static void invalidateAxes() {
 
 static void handleButtons(uint32_t now) {
   static bool selectWasPressed = false;
+  static bool confirmWasPressed = false;
   const bool selectPressed = buttonStable[0];
   const bool pressedEdge = selectPressed && !selectWasPressed;
+  const bool selectRelease = !selectPressed && selectWasPressed;
   selectWasPressed = selectPressed;
   if (pressedEdge) selectPressedAt = now;
+  const bool confirmPressed = buttonStable[1];
+  const bool confirmEdge = confirmPressed && !confirmWasPressed;
+  confirmWasPressed = confirmPressed;
 
   // A held button is activity: never time out during a manual command.
   if (buttonRaw[0] || buttonRaw[1] || buttonStable[0] || buttonStable[1])
@@ -472,6 +522,7 @@ static void handleButtons(uint32_t now) {
   if (!manualMode && selectPressed && buttonRaw[0] &&
       now - selectPressedAt >= MANUAL_HOLD_MS) {
     manualMode = true;
+    selectPressedAt = 0;
     selection = 0; // Start with front-left fill.
     lastButtonActivityAt = now;
     waitForRelease = true; // Confirmation must be released after entry.
@@ -482,6 +533,13 @@ static void handleButtons(uint32_t now) {
     if (buttonStable[1] || buttonRaw[1]) waitForRelease = true;
   }
 
+  if (!manualMode && selectRelease && selectPressedAt != 0 &&
+      now - selectPressedAt < 600U) {
+    // Short SELECT cycles the controller-defined presets; a long hold enters manual mode.
+    if (controllerSettingsLoaded) selectedPreset = (selectedPreset + 1U) % 3U;
+    selectPressedAt = 0;
+  }
+  if (!manualMode && confirmEdge) activateSelectedPreset();
   if (manualMode && now - lastButtonActivityAt >= MANUAL_IDLE_MS) {
     if (activeSelection >= 0) sendCancel(activeSelection / 2);
     manualMode = false;
@@ -730,10 +788,23 @@ static void render(bool full) {
   }
   drawSelection(full);
   static int8_t shownManual = -1;
-  if (full || shownManual != (int8_t)manualMode) {
+  static int8_t shownPreset = -1;
+  if (full || shownManual != (int8_t)manualMode || shownPreset != (int8_t)selectedPreset) {
     gfx.fillRect(0, 218, 135, 22, BG);
-    if (manualMode) drawText(31, 222, "manual", MINT, BG, 2);
-    shownManual = manualMode;
+    if (manualMode) {
+      drawText(31, 222, "manual", MINT, BG, 2);
+    } else if (controllerSettingsLoaded) {
+      char line[32];
+      const uint16_t *v = controllerSettings.presetDbar[selectedPreset];
+      snprintf(line, sizeof(line), "%.3s %u/%u/%u/%u",
+        controllerSettings.presetNames[selectedPreset],
+        v[0], v[1], v[2], v[3]);
+      drawText(1, 222, line, MINT, BG, 1);
+    } else {
+      drawText(14, 222, "WAIT PRESETS", ORANGE, BG, 1);
+    }
+    shownManual = (int8_t)manualMode;
+    shownPreset = (int8_t)selectedPreset;
   }
 }
 
@@ -798,6 +869,8 @@ void loop() {
         memset(controllerMac, 0, sizeof(controllerMac));
       }
       lastControllerPacketMs = 0;
+      controllerSettingsLoaded = false;
+      lastSettingsRequestMs = 0;
       lastDiscoveryMs = now;
       sendDiscovery();
       invalidateAxes();
@@ -811,6 +884,25 @@ void loop() {
     lastDiscoveryMs = now;
     const uint8_t heartbeat[2] = {0xE1, 0x02};
     esp_now_send(controllerMac, heartbeat, sizeof(heartbeat));
+  }
+
+  if (linked && !controllerSettingsLoaded && now - lastSettingsRequestMs >= 750U) {
+    requestControllerSettings();
+    lastSettingsRequestMs = now;
+  }
+
+  if (settingsPending) {
+    noInterrupts();
+    SettingsFrame snapshot = receivedSettings;
+    settingsPending = false;
+    interrupts();
+    if (snapshot.marker == 0xA2 && snapshot.version == 2 &&
+        snapshot.check == checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) {
+      memcpy(&controllerSettings, &snapshot, sizeof(snapshot));
+      controllerSettingsLoaded = true;
+      if (selectedPreset > 2) selectedPreset = 0;
+      render(true);
+    }
   }
 
   if (telemetryPending) {
