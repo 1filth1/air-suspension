@@ -261,13 +261,38 @@ static bool controllerPeerKnown = false;
 static bool linked = false;
 static uint8_t controllerMac[6];
 static uint32_t lastControllerPacketMs = 0;
+static uint32_t lastSettingsRequestMs = 0;
 static uint32_t lastDiscoveryMs = 0;
 static uint32_t discoveryConfirmAtMs = 0;
 static bool discoveryConfirmPending = false;
 
 static Telemetry receivedTelemetry;
+static SettingsFrame receivedSettings = {};
+static volatile bool settingsPending = false;
+static SettingsFrame controllerSettings = {};
+static bool controllerSettingsLoaded = false;
+static uint8_t selectedPreset = 0;
 static volatile bool telemetryPending = false;
 static uint32_t lastTelemetryMs = 0;
+
+struct SettingsFrame {
+  uint8_t marker, version;
+  uint32_t generation;
+  uint16_t wheelLimitDbar[4]; uint16_t presetDbar[3][4];
+  uint16_t tankLimitDbar, compressorOnDbar, targetToleranceDbar;
+  uint16_t autoTimeoutSec, compressorMaxRunSec, manualTimeoutMs;
+  uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5];
+  int16_t zeroMilliVolts[5]; char presetNames[3][13]; uint32_t check;
+} __attribute__((packed));
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
+static uint32_t checkBytes(const uint8_t *bytes, size_t length) {
+  uint32_t value = 0x6D2B79F5UL;
+  for (size_t i = 0; i < length; ++i) {
+    value = (value << 5) | (value >> 27);
+    value ^= bytes[i];
+  }
+  return value;
+}
 
 // bar[0..3] are the wheels FL, FR, RL, RR; bar[4] is the tank.
 static float pressureBar[5] = {NAN, NAN, NAN, NAN, NAN};
@@ -309,6 +334,17 @@ static void sendCommand(const uint8_t *payload, size_t length) {
   if (esp_now_send(controllerMac, payload, length) != ESP_OK) {
     linked = false;
   }
+}
+
+static void requestControllerSettings() {
+  const uint8_t request[2] = {0xB1, 0x42};
+  sendCommand(request, sizeof(request));
+}
+
+static void activateSelectedPreset() {
+  if (!controllerSettingsLoaded || !linked) return;
+  const uint8_t command[3] = {0xB1, 0x44, selectedPreset};
+  sendCommand(command, sizeof(command));
 }
 
 static void sendManual(uint8_t wheel, bool fill) {
@@ -366,8 +402,17 @@ static void handleEspNowFrame(const uint8_t *mac, const uint8_t *data, int len) 
   }
 
   if (!controllerPeerKnown || memcmp(controllerMac, mac, 6) != 0) return;
-  // Telemetry is the only encrypted frame this remote needs; settings frames
-  // are ignored so a v3 controller does not confuse the parser.
+  if (len == (int)sizeof(SettingsFrame) && data[0] == 0xA2) {
+    SettingsFrame frame;
+    memcpy(&frame, data, sizeof(frame));
+    if (frame.version == 2 &&
+        frame.check == checkBytes((const uint8_t *)&frame, offsetof(SettingsFrame, check))) {
+      memcpy(&receivedSettings, &frame, sizeof(frame));
+      settingsPending = true;
+      lastControllerPacketMs = millis();
+    }
+    return;
+  }
   if (len != (int)sizeof(Telemetry) || data[0] != 0xA1) return;
   memcpy(&receivedTelemetry, data, sizeof(receivedTelemetry));
   lastControllerPacketMs = millis();
@@ -460,10 +505,15 @@ static void invalidateAxes() {
 
 static void handleButtons(uint32_t now) {
   static bool selectWasPressed = false;
+  static bool confirmWasPressed = false;
   const bool selectPressed = buttonStable[0];
   const bool pressedEdge = selectPressed && !selectWasPressed;
   selectWasPressed = selectPressed;
   if (pressedEdge) selectPressedAt = now;
+  const bool confirmPressed = buttonStable[1];
+  const bool confirmEdge = confirmPressed && !confirmWasPressed;
+  const bool confirmRelease = !confirmPressed && confirmWasPressed;
+  confirmWasPressed = confirmPressed;
 
   // A held button is activity: never time out during a manual command.
   if (buttonRaw[0] || buttonRaw[1] || buttonStable[0] || buttonStable[1])
@@ -482,6 +532,13 @@ static void handleButtons(uint32_t now) {
     if (buttonStable[1] || buttonRaw[1]) waitForRelease = true;
   }
 
+  if (!manualMode && !selectPressed && selectWasPressed == false && !buttonRaw[0] &&
+      selectPressedAt != 0 && now - selectPressedAt < 600U) {
+    // Short SELECT cycles the controller-defined presets; a long hold enters manual mode.
+    selectedPreset = (selectedPreset + 1U) % 3U;
+    selectPressedAt = 0;
+  }
+  if (!manualMode && confirmEdge) activateSelectedPreset();
   if (manualMode && now - lastButtonActivityAt >= MANUAL_IDLE_MS) {
     if (activeSelection >= 0) sendCancel(activeSelection / 2);
     manualMode = false;
@@ -730,10 +787,24 @@ static void render(bool full) {
   }
   drawSelection(full);
   static int8_t shownManual = -1;
-  if (full || shownManual != (int8_t)manualMode) {
+  static int8_t shownPreset = -1;
+  if (full || shownManual != (int8_t)manualMode || shownPreset != (int8_t)selectedPreset) {
     gfx.fillRect(0, 218, 135, 22, BG);
-    if (manualMode) drawText(31, 222, "manual", MINT, BG, 2);
-    shownManual = manualMode;
+    if (manualMode) {
+      drawText(31, 222, "manual", MINT, BG, 2);
+    } else if (controllerSettingsLoaded) {
+      char line[32];
+      const uint16_t *v = controllerSettings.presetDbar[selectedPreset];
+      snprintf(line, sizeof(line), "%.12s %u.%u/%u.%u/%u.%u/%u.%u",
+        controllerSettings.presetNames[selectedPreset],
+        v[0] / 10, v[0] % 10, v[1] / 10, v[1] % 10,
+        v[2] / 10, v[2] % 10, v[3] / 10, v[3] % 10);
+      drawText(1, 222, line, MINT, BG, 1);
+    } else {
+      drawText(14, 222, "WAIT PRESETS", ORANGE, BG, 1);
+    }
+    shownManual = (int8_t)manualMode;
+    shownPreset = (int8_t)selectedPreset;
   }
 }
 
@@ -811,6 +882,25 @@ void loop() {
     lastDiscoveryMs = now;
     const uint8_t heartbeat[2] = {0xE1, 0x02};
     esp_now_send(controllerMac, heartbeat, sizeof(heartbeat));
+  }
+
+  if (linked && !controllerSettingsLoaded && now - lastSettingsRequestMs >= 750U) {
+    requestControllerSettings();
+    lastSettingsRequestMs = now;
+  }
+
+  if (settingsPending) {
+    noInterrupts();
+    SettingsFrame snapshot = receivedSettings;
+    settingsPending = false;
+    interrupts();
+    if (snapshot.marker == 0xA2 && snapshot.version == 2 &&
+        snapshot.check == checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) {
+      memcpy(&controllerSettings, &snapshot, sizeof(snapshot));
+      controllerSettingsLoaded = true;
+      if (selectedPreset > 2) selectedPreset = 0;
+      render(true);
+    }
   }
 
   if (telemetryPending) {
