@@ -472,15 +472,23 @@ static const uint32_t REPEAT_INTERVAL_MS = 180;
 static bool buttonRaw[2] = {};
 static bool buttonStable[2] = {};
 static uint32_t buttonRawAt[2] = {};
-static int8_t selection = -1; // First selection press: FL fill; eight states.
+static int8_t selection = -1; // Manual wheel/action: FL fill; eight states.
 static int8_t activeSelection = -1;
 static bool waitForRelease = true;
 static uint32_t sentAt = 0;
 static bool manualMode = false;
+static uint8_t selectedPreset = 0;
 static uint32_t selectPressedAt = 0;
 static uint32_t lastButtonActivityAt = 0;
 static const uint32_t MANUAL_HOLD_MS = 2000;
 static const uint32_t MANUAL_IDLE_MS = 2000;
+static const uint8_t PRESET_COMMAND = 0x44;
+
+static void sendPreset(uint8_t preset) {
+  if (preset >= 3 || !linked || !controllerSettingsLoaded) return;
+  const uint8_t command[] = {0xB1, PRESET_COMMAND, preset};
+  sendCommand(command, sizeof(command));
+}
 
 static void pollButtons(uint32_t now) {
   for (uint8_t i = 0; i < 2; ++i) {
@@ -501,26 +509,43 @@ static void invalidateAxes() {
 
 static void handleButtons(uint32_t now) {
   static bool selectWasPressed = false;
+  static bool confirmWasPressed = false;
   const bool selectPressed = buttonStable[0];
-  const bool pressedEdge = selectPressed && !selectWasPressed;
+  const bool confirmPressed = buttonStable[1];
+  const bool selectPressedEdge = selectPressed && !selectWasPressed;
+  const bool selectReleasedEdge = !selectPressed && selectWasPressed;
+  const bool confirmPressedEdge = confirmPressed && !confirmWasPressed;
+  const bool confirmReleasedEdge = !confirmPressed && confirmWasPressed;
   selectWasPressed = selectPressed;
-  if (pressedEdge) selectPressedAt = now;
+  confirmWasPressed = confirmPressed;
+  if (selectPressedEdge) selectPressedAt = now;
 
   // A held button is activity: never time out during a manual command.
   if (buttonRaw[0] || buttonRaw[1] || buttonStable[0] || buttonStable[1])
     lastButtonActivityAt = now;
 
+  // Holding SELECT enters manual mode; a short click selects the next preset.
   if (!manualMode && selectPressed && buttonRaw[0] &&
       now - selectPressedAt >= MANUAL_HOLD_MS) {
     manualMode = true;
     selection = 0; // Start with front-left fill.
     lastButtonActivityAt = now;
-    waitForRelease = true; // Confirmation must be released after entry.
-  } else if (manualMode && pressedEdge) {
+    waitForRelease = true; // CONFIRM must be released after entry.
+  } else if (manualMode && selectPressedEdge) {
     if (activeSelection >= 0) sendCancel(activeSelection / 2);
     activeSelection = -1;
     selection = (selection + 1) % 8;
     if (buttonStable[1] || buttonRaw[1]) waitForRelease = true;
+  } else if (!manualMode && selectReleasedEdge &&
+             now - selectPressedAt < MANUAL_HOLD_MS &&
+             linked && controllerSettingsLoaded) {
+    selectedPreset = (selectedPreset + 1) % 3;
+  }
+
+  // Outside manual mode, a short CONFIRM click applies the highlighted preset.
+  if (!manualMode && confirmReleasedEdge &&
+      linked && controllerSettingsLoaded) {
+    sendPreset(selectedPreset);
   }
 
   if (manualMode && now - lastButtonActivityAt >= MANUAL_IDLE_MS) {
@@ -656,15 +681,9 @@ static void drawPresetFooter(bool force) {
   static int8_t shownPreset = -1;
   static bool shownManual = false;
   static bool shownLoaded = false;
-  static uint32_t rotatedAt = 0;
-  const uint32_t now = millis();
-  if (!manualMode && controllerSettingsLoaded && now - rotatedAt >= 2600U) {
-    shownPreset = (shownPreset + 1) % 3;
-    rotatedAt = now;
-  }
   const bool changed = force || shownManual != manualMode ||
                        shownLoaded != controllerSettingsLoaded ||
-                       (!manualMode && controllerSettingsLoaded && shownPreset < 0);
+                       shownPreset != (int8_t)selectedPreset;
   static char shownText[32] = "";
   char text[32] = "";
   if (manualMode) {
@@ -672,9 +691,8 @@ static void drawPresetFooter(bool force) {
   } else if (!controllerSettingsLoaded) {
     snprintf(text, sizeof(text), "%s", linked ? "SYNC SETTINGS..." : "NO CONTROLLER");
   } else {
-    if (shownPreset < 0) shownPreset = 0;
-    const uint8_t p = (uint8_t)shownPreset;
-    snprintf(text, sizeof(text), "%.6s %.1f/%.1f/%.1f/%.1f",
+    const uint8_t p = selectedPreset;
+    snprintf(text, sizeof(text), ">%.6s %.1f/%.1f/%.1f/%.1f",
       presetNames[p],
       presetTargets[p][0] / 10.0f, presetTargets[p][1] / 10.0f,
       presetTargets[p][2] / 10.0f, presetTargets[p][3] / 10.0f);
@@ -684,6 +702,7 @@ static void drawPresetFooter(bool force) {
     drawText(2, 222, text, controllerSettingsLoaded ? MINT : ORANGE, BG, 1);
     snprintf(shownText, sizeof(shownText), "%s", text);
   }
+  shownPreset = (int8_t)selectedPreset;
   shownManual = manualMode;
   shownLoaded = controllerSettingsLoaded;
 }
