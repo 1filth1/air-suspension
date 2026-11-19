@@ -8,6 +8,7 @@
 #include <Adafruit_ST7789.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <string.h>
 #include <stddef.h>
 #include <soc/gpio_reg.h>
 #include <soc/soc.h>
@@ -65,11 +66,12 @@ struct SettingsFrame {
   uint16_t tankLimitDbar; uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
   uint32_t check;
 } __attribute__((packed));
 struct SettingsAckFrame { uint8_t marker, opcode, status; uint32_t generation; } __attribute__((packed));
 static_assert(sizeof(SettingsAckFrame) == 7, "Settings ack layout changed");
-static_assert(sizeof(SettingsFrame) == 75, "Settings frame layout changed");
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
 uint32_t checkBytes(const uint8_t *bytes, size_t length) {
   uint32_t value = 0x6D2B79F5UL;
   for (size_t i = 0; i < length; ++i) { value = (value << 5) | (value >> 27); value ^= bytes[i]; }
@@ -385,7 +387,7 @@ uint32_t settingsSaveUntilMs = 0, settingsSaveDeadlineMs = 0;
 bool settingsSavePending = false;
 bool controllerSettingsLoaded = false;
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
-const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
+char preset[3][13] = {"PARK", "DRIVE", "LIFT"};
 float pressure[5] = {NAN,NAN,NAN,NAN,NAN};
 uint16_t target[3][4]={{20,20,20,20},{55,55,55,55},{80,80,80,80}};
 bool linked=false, scanning=false, sleepMode=false;
@@ -398,6 +400,7 @@ bool manualMode=false;
 BleState bleState = BLE_SEARCHING;
 volatile bool telemetry=false;
 uint8_t page=0, cursor=0, active=0, editPreset=0, editWheel=0, calSensor=0, brightness=100;
+bool nameEditMode=false;uint8_t nameCursor=0;
 // These two settings are independent from the screen backlight. They are
 // saved in flash so the chosen LED level and beep level survive a restart.
 uint8_t ledBrightness=100, buzzerVolume=70;
@@ -1052,7 +1055,7 @@ void editor() {
   drawEditorHeader();
   for (uint8_t i = 0; i < 4; ++i) drawEditorWheel(i, i == editWheel);
   const char *message = settingsSaveMessage();
-  foot(message ? message : (controllerSettingsLoaded ? "UP/DN value  OK next wheel  BACK menu" : "WAIT FOR CONTROLLER SETTINGS"));
+  foot(message ? message : (nameEditMode ? "UP/DN char  OK next  BACK save" : (controllerSettingsLoaded ? "UP/DN value  OK next wheel  NEXT name  BACK menu" : "WAIT FOR CONTROLLER SETTINGS")));
 }
 
 void drawCalibrationSensor(uint8_t index, bool selected) {
@@ -1117,6 +1120,9 @@ void sendSettingsUpdate() {
   settingsSaveDeadlineMs = millis() + 1500U;
 }
 
+void sendPresetNameUpdate(){uint8_t packet[19]={0xB1,0x46,editPreset};memcpy(&packet[3],preset[editPreset],12);const uint32_t sum=checkBytes(packet,15);memcpy(&packet[15],&sum,4);sendCommand(packet,sizeof(packet));}
+void cycleNameChar(int8_t delta){static const char alphabet[]=" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";char &ch=preset[editPreset][nameCursor];const char *at=strchr(alphabet,ch);int pos=at?(int)(at-alphabet):0;const int count=(int)sizeof(alphabet)-1;pos=(pos+delta+count)%count;ch=alphabet[pos];}
+
 void sendCalibrationUpdate() {
   if (!controllerSettingsLoaded || !linked) {
     settingsSavePending = false;
@@ -1152,10 +1158,11 @@ void applyControllerSettings() {
   memcpy(&snapshot, &receivedSettings, sizeof(snapshot));
   settingsFramePending = false;
   interrupts();
-  if (snapshot.marker != 0xA2 || snapshot.version != 1 ||
+  if (snapshot.marker != 0xA2 || snapshot.version != 2 ||
       snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
   controllerSettings = snapshot;
   memcpy(target, snapshot.presetDbar, sizeof(target));
+  memcpy(preset,snapshot.presetNames,sizeof(preset));
   compressorOnBar10 = snapshot.compressorOnDbar;
   compressorOffBar10 = snapshot.tankLimitDbar;
   controllerSettingsLoaded = true;
@@ -1849,6 +1856,8 @@ void action(Key k){
     else if(k==BACK){transitionTo(2, 0);}
   } else if(page==4){
     if (!controllerSettingsLoaded) return;
+    if(k==NEXT){if(nameEditMode)sendPresetNameUpdate();nameEditMode=!nameEditMode;nameCursor=0;render();return;}
+    if(nameEditMode){if(k==UP)cycleNameChar(1);else if(k==DOWN)cycleNameChar(-1);else if(k==KEYOK)nameCursor=(nameCursor+1)%12;else if(k==BACK){sendPresetNameUpdate();nameEditMode=false;render();return;}render();return;}
     if (k == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) {
       target[editPreset][editWheel] += 1;
       saveTarget();

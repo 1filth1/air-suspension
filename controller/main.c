@@ -44,6 +44,7 @@ typedef struct __attribute__((packed)) {
   uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
   uint32_t check;
 } SettingsFrame;
 typedef struct __attribute__((packed)) { uint8_t marker,opcode,status; uint32_t generation; } AckFrame;
@@ -77,6 +78,12 @@ typedef struct __attribute__((packed)) {
 } CalibrationState;
 static uint16_t calBar10[5]={0,0,0,0,0};
 static uint8_t calValidMask=0;
+static char presetNames[3][13]={{"PARK"},{"DRIVE"},{"LIFT"}};
+typedef struct __attribute__((packed)){char names[3][13];uint32_t check;} PresetNameStore;
+static uint32_t nameStoreCheck(const PresetNameStore *s){return checkBytes((const uint8_t*)s,offsetof(PresetNameStore,check));}
+static bool validPresetName(const char *s){bool any=false;for(uint8_t i=0;i<12;i++){unsigned char ch=(unsigned char)s[i];if(ch==0)break;if(ch<32||ch>126)return false;if(ch!=' ')any=true;}return any;}
+static void loadPresetNames(void){memcpy(presetNames[0],"PARK",5);memcpy(presetNames[1],"DRIVE",6);memcpy(presetNames[2],"LIFT",5);nvs_handle_t h;if(nvs_open("airride",NVS_READONLY,&h)!=ESP_OK)return;PresetNameStore saved={0};size_t bytes=sizeof(saved);if(nvs_get_blob(h,"preset_names",&saved,&bytes)==ESP_OK&&bytes==sizeof(saved)&&saved.check==nameStoreCheck(&saved)){bool valid=true;for(uint8_t i=0;i<3;i++)valid=valid&&saved.names[i][12]==0&&validPresetName(saved.names[i]);if(valid)memcpy(presetNames,saved.names,sizeof(presetNames));}nvs_close(h);}
+static bool savePresetName(uint8_t index,const uint8_t *raw){if(index>2)return false;char candidate[13]={0};memcpy(candidate,raw,12);if(!validPresetName(candidate))return false;for(int i=11;i>=0&&candidate[i]==' ';i--)candidate[i]=0;if(!candidate[0])return false;PresetNameStore next={0};memcpy(next.names,presetNames,sizeof(next.names));memcpy(next.names[index],candidate,sizeof(candidate));next.check=nameStoreCheck(&next);nvs_handle_t h;if(nvs_open("airride",NVS_READWRITE,&h)!=ESP_OK)return false;esp_err_t e=nvs_set_blob(h,"preset_names",&next,sizeof(next));if(e==ESP_OK)e=nvs_commit(h);PresetNameStore verify={0};size_t bytes=sizeof(verify);if(e==ESP_OK)e=nvs_get_blob(h,"preset_names",&verify,&bytes);bool ok=e==ESP_OK&&bytes==sizeof(verify)&&verify.check==nameStoreCheck(&verify)&&memcmp(&next,&verify,sizeof(next))==0;nvs_close(h);if(ok)memcpy(presetNames,verify.names,sizeof(presetNames));return ok;}
 static uint32_t now(void){return xTaskGetTickCount()*portTICK_PERIOD_MS;}
 static bool elapsed(uint32_t n,uint32_t a,uint32_t t){return (uint32_t)(n-a)>=t;}
 static uint32_t checkBytes(const uint8_t *b,size_t len){uint32_t v=0x6D2B79F5UL;for(size_t i=0;i<len;i++){v=(v<<5)|(v>>27);v^=b[i];}return v;}
@@ -165,12 +172,13 @@ static void sendSettings(void){
   if(!linked||!encrypted){
     return;
   }
-  SettingsFrame f={0};f.marker=0xA2;f.version=1;f.generation=config.generation;
+  SettingsFrame f={0};f.marker=0xA2;f.version=2;f.generation=config.generation;
   memcpy(f.wheelLimitDbar,config.wheelLimitDbar,sizeof(f.wheelLimitDbar));memcpy(f.presetDbar,config.presetDbar,sizeof(f.presetDbar));f.tankLimitDbar=config.tankLimitDbar;
   f.compressorOnDbar=config.compressorOnDbar;f.targetToleranceDbar=config.targetToleranceDbar;
   f.autoTimeoutSec=config.autoTimeoutSec;f.compressorMaxRunSec=config.compressorMaxRunSec;f.manualTimeoutMs=config.manualTimeoutMs;
   f.calibratedMask=config.calibratedMask;memcpy(f.calibrationReferenceDbar,config.calibrationReferenceDbar,sizeof(f.calibrationReferenceDbar));
   for(uint8_t i=0;i<5;i++)f.zeroMilliVolts[i]=(int16_t)lroundf(config.zero[i]*1000.0f);
+  memcpy(f.presetNames,presetNames,sizeof(f.presetNames));
   f.check=checkBytes((const uint8_t*)&f,offsetof(SettingsFrame,check));esp_now_send(peerMac,(const uint8_t*)&f,sizeof(f));
 }
 static void sendAck(uint8_t opcode,uint8_t status){if(!linked||!encrypted)return;AckFrame a={.marker=0xA3,.opcode=opcode,.status=status,.generation=config.generation};esp_now_send(peerMac,(const uint8_t*)&a,sizeof(a));}
@@ -216,7 +224,8 @@ static uint8_t calibrate(uint8_t s,uint16_t bar10){
   calBar10[s]=bar10;calValidMask|=(uint8_t)(1U<<s);
   return 1;
 }
-static void manualStart(uint8_t w,bool up,float p[5]){if(w>3||!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w))))return;cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
+static float minimumWheelPsi(void){return (2.0f/10.0f)/.0689476f;}
+static void manualStart(uint8_t w,bool up,float p[5]){if(w>3)return;if(!good(w,p[w])||(up&&(!good(4,p[4])||p[w]>=wheelLimitPsi(w)))||(!up&&p[w]<=minimumWheelPsi())){cancel(w);return;}cancel(w);set(up?fill[w]:dump[w],1);manual[w]=now();}
 static void targetStart(uint8_t w,uint16_t b){if(w>3||b>config.wheelLimitDbar[w])return;cancel(w);jobs[w].active=true;jobs[w].goal=((float)b/10.0f)/.0689476f;jobs[w].start=jobs[w].next=now();}
 static void presetStart(uint8_t preset){if(preset>2)return;for(uint8_t w=0;w<4;w++)targetStart(w,config.presetDbar[preset][w]);}
 static uint16_t readLe16(const uint8_t *p){return (uint16_t)p[0]|((uint16_t)p[1]<<8);}
@@ -242,13 +251,14 @@ static void runJob(uint8_t w,float p[5]){
   float e=j->goal-p[w];
   float tolerance=((float)config.targetToleranceDbar/10.0f)/.0689476f;
   if(fabsf(e)<=tolerance){closeWheel(w);if(!j->settled){j->settled=true;j->settledAt=n;}else if(elapsed(n,j->settledAt,2000))j->active=false;return;}
-  j->settled=false;if(e>0){if(!good(4,p[4])||p[4]>=tankLimitPsi()){cancel(w);return;}set(fill[w],1);}else set(dump[w],1);
+  j->settled=false;if(e>0){if(!good(4,p[4])||p[4]>=tankLimitPsi()){cancel(w);return;}set(fill[w],1);}else{if(p[w]<=minimumWheelPsi()){cancel(w);return;}set(dump[w],1);}
   j->pulse=true;j->pulseAt=n;
 }
 static void process(const uint8_t *c,uint8_t len,float p[5]){
   if(len<2||c[0]!=0xB1)return;
   if(len==2&&c[1]==0x42){sendSettings();return;}
   if(c[1]==0x43){bool ok=changeSettings(c,len);sendAck(0x43,ok?1:0);sendSettings();return;}
+  if(c[1]==0x46&&len==19){bool ok=readLe32(&c[15])==checkBytes(c,15)&&savePresetName(c[2],&c[3]);sendAck(0x46,ok?1:0);sendSettings();return;}
   if(len==5&&c[1]==0x40){uint16_t v=readLe16(&c[3]);targetStart(c[2],v);return;}
   if(len==3&&c[1]==0x44){presetStart(c[2]);return;}
   if(len==4&&c[1]==0x45){uint8_t preset=c[2],wheel=c[3];if(preset<3&&wheel<4)targetStart(wheel,config.presetDbar[preset][wheel]);return;}
@@ -259,7 +269,7 @@ static void process(const uint8_t *c,uint8_t len,float p[5]){
 }
 static void update(float p[5]){
   uint32_t n=now();
-  for(uint8_t w=0;w<4;w++)if(manual[w]&&(elapsed(n,manual[w],config.manualTimeoutMs)||p[w]>=wheelLimitPsi(w)))closeWheel(w);
+  for(uint8_t w=0;w<4;w++)if(manual[w]&&(elapsed(n,manual[w],config.manualTimeoutMs)||!good(w,p[w])||p[w]>=wheelLimitPsi(w)||p[w]<=minimumWheelPsi()))closeWheel(w);
   if(!good(4,p[4])||p[4]>=tankLimitPsi()||(compressor&&elapsed(n,compressorAt,(uint32_t)config.compressorMaxRunSec*1000U))){compressorSet(0);lockout=true;}
   else if(!lockout&&p[4]<=((float)config.compressorOnDbar/10.0f)/.0689476f)compressorSet(1);
   else if(p[4]>=tankLimitPsi())compressorSet(0);
@@ -275,9 +285,11 @@ void app_main(void){
   }
   if(nvsResult==ESP_OK){
     loadConfig();
+    loadPresetNames();
   }else{
     ESP_LOGE(TAG,"NVS initialization failed: %s; using safe defaults, calibration cannot be saved",esp_err_to_name(nvsResult));
     defaultConfig(&config);
+    loadPresetNames();
   }
   gpio_config_t o={.pin_bit_mask=(1ULL<<4)|(1ULL<<13)|(1ULL<<14)|(1ULL<<16)|(1ULL<<17)|(1ULL<<18)|(1ULL<<19)|(1ULL<<21)|(1ULL<<22),.mode=GPIO_MODE_OUTPUT};gpio_config(&o);stopAll();
   adc_oneshot_unit_init_cfg_t u={.unit_id=ADC_UNIT_1};adc_oneshot_new_unit(&u,&adc);adc_oneshot_chan_cfg_t a={.bitwidth=ADC_BITWIDTH_12,.atten=ADC_ATTEN_DB_12};for(uint8_t i=0;i<5;i++)adc_oneshot_config_channel(adc,channel[i],&a);

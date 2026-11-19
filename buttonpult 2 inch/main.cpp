@@ -9,6 +9,7 @@
 #include <Adafruit_ST7789.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <string.h>
 
 // ST7789, SPI display in landscape orientation: 320 x 240.
 
@@ -86,9 +87,10 @@ struct SettingsFrame {
   uint16_t tankLimitDbar; uint16_t compressorOnDbar; uint16_t targetToleranceDbar;
   uint16_t autoTimeoutSec; uint16_t compressorMaxRunSec; uint16_t manualTimeoutMs;
   uint8_t calibratedMask; uint16_t calibrationReferenceDbar[5]; int16_t zeroMilliVolts[5];
+  char presetNames[3][13];
   uint32_t check;
 } __attribute__((packed));
-static_assert(sizeof(SettingsFrame) == 75, "Settings frame layout changed");
+static_assert(sizeof(SettingsFrame) == 114, "Settings frame layout changed");
 uint32_t checkBytes(const uint8_t *bytes, size_t length) {
   uint32_t value = 0x6D2B79F5UL;
   for (size_t i = 0; i < length; ++i) { value = (value << 5) | (value >> 27); value ^= bytes[i]; }
@@ -114,7 +116,7 @@ volatile bool settingsFramePending = false;
 bool controllerSettingsLoaded = false;
 
 const char *wheel[4] = {"FL", "FR", "RL", "RR"};
-const char *preset[3] = {"PARK", "DRIVE", "LIFT"};
+char preset[3][13] = {"PARK", "DRIVE", "LIFT"};
 const uint8_t buttonPins[BUTTON_COUNT] = {
   BTN_UP, BTN_DOWN, BTN_MENU, BTN_NEXT, BTN_OK, BTN_PARK, BTN_DRIVE, BTN_LIFT, BTN_IN, BTN_OUT, BTN_PRESET
 };
@@ -135,6 +137,7 @@ bool blink = false;
 uint8_t active = 0, cursor = 0, selectedWheel = 0, editPreset = 0, editWheel = 0, calSensor = 0;
 uint16_t calValue = 0;
 Page page = HOME;
+bool nameEditMode=false;uint8_t nameCursor=0;
 BleState bleState = SEARCHING;
 
 void printBar(float v) { if (isnan(v)) tft.print("--.-"); else tft.printf("%.1f", v); }
@@ -230,7 +233,7 @@ void menuRow(uint8_t row, const char *text, bool selected) {
 }
 void settings() { header("MENU"); const char *m[] = {"START PRESET", "EDIT PRESETS", "CALIBRATE", "BACK TO DASHBOARD"}; for (uint8_t i = 0; i < 4; ++i) menuRow(i, m[i], i == cursor); }
 void picker() { header("START PRESET"); for (uint8_t i = 0; i < 3; ++i) menuRow(i, preset[i], i == cursor); tft.setTextColor(DIM); tft.setCursor(10, 155); tft.print("OK sends the selected targets"); }
-void editor() { header("EDIT PRESETS"); tft.setTextColor(DIM); tft.setCursor(12, 42); tft.print(preset[editPreset]); for (uint8_t i = 0; i < 4; ++i) { const int y = 55 + i * 31; const bool sel = i == editWheel; tft.fillRoundRect(8, y, 304, 24, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 24, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 8); tft.print(wheel[i]); tft.setCursor(248, y + 8); tft.printf("%.1f", target[editPreset][i] / 10.0f); } }
+void editor() { header(nameEditMode ? "EDIT PRESET NAME" : "EDIT PRESETS"); tft.setTextColor(DIM); tft.setCursor(12, 42); tft.print(preset[editPreset]); if(nameEditMode){tft.setTextColor(ORANGE);tft.setCursor(12,65);tft.printf("CHAR %u / 12",nameCursor+1);tft.setCursor(12,92);tft.print("UP/DN change  OK next");tft.setCursor(12,115);tft.print("NEXT saves name");return;} for (uint8_t i = 0; i < 4; ++i) { const int y = 55 + i * 31; const bool sel = i == editWheel; tft.fillRoundRect(8, y, 304, 24, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 24, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 8); tft.print(wheel[i]); tft.setCursor(248, y + 8); tft.printf("%.1f", target[editPreset][i] / 10.0f); } }
 void calibration() { header("CALIBRATE"); for (uint8_t i = 0; i < 5; ++i) { const int y = 40 + i * 27; const bool sel = i == calSensor; tft.fillRoundRect(8, y, 304, 21, 7, sel ? ORANGE : BG); if (!sel) tft.drawRoundRect(8, y, 304, 21, 7, DIM); tft.setTextColor(sel ? BG : FG); tft.setCursor(18, y + 7); tft.print(i < 4 ? wheel[i] : "TANK"); tft.setCursor(245, y + 7); if (sel) tft.printf("%.1f", calValue / 10.0f); else printBar(pressure[i]); } }
 void render() { if (page == HOME) home(); else if (page == SETTINGS) settings(); else if (page == PICKER) picker(); else if (page == EDITOR) editor(); else calibration(); }
 
@@ -331,11 +334,13 @@ void sendSettingsUpdate() {
 void applyControllerSettings() {
   if (!settingsFramePending) return;
   SettingsFrame snapshot; noInterrupts(); memcpy(&snapshot, &receivedSettings, sizeof(snapshot)); settingsFramePending = false; interrupts();
-  if (snapshot.marker != 0xA2 || snapshot.version != 1 || snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
-  controllerSettings = snapshot; memcpy(target, snapshot.presetDbar, sizeof(target)); controllerSettingsLoaded = true;
+  if (snapshot.marker != 0xA2 || snapshot.version != 2 || snapshot.check != checkBytes((const uint8_t *)&snapshot, offsetof(SettingsFrame, check))) return;
+  controllerSettings = snapshot; memcpy(target, snapshot.presetDbar, sizeof(target)); memcpy(preset,snapshot.presetNames,sizeof(preset)); controllerSettingsLoaded = true;
   if (page == EDITOR) editor();
 }
 
+void sendPresetNameUpdate(){uint8_t packet[19]={0xB1,0x46,editPreset};memcpy(&packet[3],preset[editPreset],12);const uint32_t sum=checkBytes(packet,15);memcpy(&packet[15],&sum,4);sendCommand(packet,sizeof(packet));}
+void cycleNameChar(int8_t delta){static const char alphabet[]=" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";char &ch=preset[editPreset][nameCursor];const char *at=strchr(alphabet,ch);int pos=at?(int)(at-alphabet):0;const int count=(int)sizeof(alphabet)-1;pos=(pos+delta+count)%count;ch=alphabet[pos];}
 void saveTarget() { sendSettingsUpdate(); }
 void press(Button b) {
   lastInput = millis();
@@ -351,7 +356,7 @@ void press(Button b) {
   }
   if (page == SETTINGS) { if (b == UP && cursor) cursor--; else if (b == DOWN && cursor < 3) cursor++; else if (b == CONFIRM) { if (cursor == 0) { page = PICKER; cursor = 0; } else if (cursor == 1) { page = EDITOR; editPreset = active; editWheel = 0; } else if (cursor == 2) { page = CALIBRATION; calSensor = 0; calValue = 0; } else page = HOME; } else if (b == MENU) page = HOME; render(); return; }
   if (page == PICKER) { if (b == UP && cursor) cursor--; else if (b == DOWN && cursor < 2) cursor++; else if (b == CONFIRM) { choosePreset(cursor); page = HOME; } else if (b == MENU) page = SETTINGS; render(); return; }
-  if (page == EDITOR) { if (!controllerSettingsLoaded) return; if (b == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) target[editPreset][editWheel]++; else if (b == DOWN && target[editPreset][editWheel]) target[editPreset][editWheel]--; else if (b == CONFIRM) editWheel = (editWheel + 1) % 4; else if (b == NEXT) editPreset = (editPreset + 1) % 3; else if (b == MENU) { page = SETTINGS; cursor = 1; } saveTarget(); render(); return; }
+  if (page == EDITOR) { if (!controllerSettingsLoaded) return; if(b==PRESET){if(nameEditMode)sendPresetNameUpdate();nameEditMode=!nameEditMode;nameCursor=0;render();return;} if(nameEditMode){if(b==UP)cycleNameChar(1);else if(b==DOWN)cycleNameChar(-1);else if(b==CONFIRM)nameCursor=(nameCursor+1)%12;else if(b==NEXT){sendPresetNameUpdate();nameEditMode=false;}else if(b==MENU){sendPresetNameUpdate();nameEditMode=false;page=SETTINGS;cursor=1;}render();return;} if (b == UP && target[editPreset][editWheel] < controllerSettings.wheelLimitDbar[editWheel]) target[editPreset][editWheel]++; else if (b == DOWN && target[editPreset][editWheel]) target[editPreset][editWheel]--; else if (b == CONFIRM) editWheel = (editWheel + 1) % 4; else if (b == NEXT) editPreset = (editPreset + 1) % 3; else if (b == MENU) { page = SETTINGS; cursor = 1; } saveTarget(); render(); return; }
   if (page == CALIBRATION) { if (b == UP && calValue < 150) calValue++; else if (b == DOWN && calValue) calValue--; else if (b == NEXT) calSensor = (calSensor + 1) % 5; else if (b == CONFIRM) { const uint8_t p[] = {0xB1, 0x41, calSensor, (uint8_t)calValue, (uint8_t)(calValue >> 8)}; sendCommand(p, sizeof(p)); } else if (b == MENU) { page = SETTINGS; cursor = 2; } render(); }
 }
 void buttons() {
