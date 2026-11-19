@@ -1,6 +1,17 @@
 {
   "releases": [
     {
+      "tag": "v0.1.0-rc.6",
+      "label": "0.1.0-rc.6",
+      "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.6",
+      "assets": {
+        "controller": "https://github.com/1filth1/air-suspension/releases/download/v0.1.0-rc.6/air-suspension-controller.hex",
+        "t-display": "https://github.com/1filth1/air-suspension/releases/download/v0.1.0-rc.6/air-suspension-remote-t-display.hex",
+        "remote-2inch": "https://github.com/1filth1/air-suspension/releases/download/v0.1.0-rc.6/air-suspension-remote-2inch.hex",
+        "keychain": "https://github.com/1filth1/air-suspension/releases/download/v0.1.0-rc.6/air-suspension-keychain.hex"
+      }
+    },
+    {
       "tag": "v0.1.0-rc.4",
       "label": "0.1.0-rc.4",
       "url": "https://github.com/1filth1/air-suspension/releases/tag/v0.1.0-rc.4",
