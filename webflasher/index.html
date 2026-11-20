@@ -37,6 +37,13 @@ progress{width:100%;height:12px;margin-top:12px;accent-color:var(--accent)}small
 </div>
 <div class="actions"><a id="releaseLink" class="button" target="_blank" rel="noopener">Открыть страницу релиза</a></div>
 <div class="notice" style="margin-top:16px"><strong id="assetName">Загружаю файл прошивки…</strong></div>
+<div class="card" style="margin-top:16px;padding:18px;background:#121d2b;box-shadow:none">
+<strong>Ручная прошивка</strong>
+<p style="margin:5px 0 10px">Если релиза нет в списке или файл уже скачан, выбери HEX с компьютера.</p>
+<label for="manualHex">Файл прошивки (.hex)</label>
+<input id="manualHex" type="file" accept=".hex, text/plain">
+<small id="manualInfo">Ручной файл заменит автоматически загружаемую прошивку до выбора другого релиза.</small>
+</div>
 <div class="warning" style="margin-top:16px">Обычная прошивка сохраняет настройки контроллера в NVS. Отметка ниже полностью стирает flash, включая сохранённые профили и калибровки.</div>
 <label style="font-weight:500"><input id="eraseAll" type="checkbox"> Полностью стереть flash перед записью</label>
 <div class="actions"><button id="flash" disabled>Подключить плату и прошить</button><span id="chip"></span></div>
@@ -54,7 +61,7 @@ const esptoolReady = import("https://unpkg.com/esptool-js@0.7.1/bundle.js")
 const $ = (id) => document.getElementById(id);
 const releaseSelect = $("release"), deviceSelect = $("device");
 const status = $("status"), flashButton = $("flash"), progress = $("progress");
-let releases = [], firmwareText = null, firmwareKey = "", loadToken = 0;
+let releases = [], firmwareText = null, firmwareKey = "", loadToken = 0, firmwareSource = "auto", manualFileName = "";
 const devices = {
   controller: { chip: "ESP32", flashSize: "4MB", asset: "air-suspension-controller.hex" },
   "t-display": { chip: "ESP32-S3", flashSize: "8MB", asset: "air-suspension-remote-t-display.hex" },
@@ -66,14 +73,20 @@ function selectedRelease() { return releases.find((item) => item.tag === release
 function updateRelease() {
   const release = selectedRelease(), device = devices[deviceSelect.value];
   $("releaseLink").href = release?.url || "#";
-  $("assetName").textContent = release ? "Нужный файл: " + device.asset : "";
+  if (firmwareSource === "manual" && firmwareText) {
+    $("assetName").textContent = "Выбран локальный HEX: " + manualFileName;
+    $("manualInfo").textContent = "Используется локальный файл. Чтобы вернуться к релизам, выбери другой релиз в списке.";
+    flashButton.disabled = !esptoolApi;
+    return;
+  }
+  $("assetName").textContent = release ? "Нужный файл: " + device.asset : "Выбери локальный HEX-файл ниже.";
   const key = release ? release.tag + ":" + deviceSelect.value : "";
   if (key !== firmwareKey) {
     firmwareKey = key;
     firmwareText = null;
     if (release) loadFirmware(release, deviceSelect.value);
   }
-  flashButton.disabled = !release || !firmwareText || !esptoolApi;
+  flashButton.disabled = !firmwareText || !esptoolApi;
 }
 async function loadFirmware(release, deviceId) {
   const token = ++loadToken;
@@ -115,11 +128,53 @@ async function loadCatalog() {
     if (esptoolLoadError) say("Не удалось загрузить модуль прошивки: " + esptoolLoadError.message);
   } catch (error) { say("Не удалось загрузить каталог: " + error.message); }
 }
-releaseSelect.addEventListener("change", updateRelease);
-deviceSelect.addEventListener("change", updateRelease);
+releaseSelect.addEventListener("change", () => {
+  firmwareSource = "auto";
+  manualFileName = "";
+  $("manualHex").value = "";
+  $("manualInfo").textContent = "Ручной файл заменит автоматически загружаемую прошивку до выбора другого релиза.";
+  firmwareKey = "";
+  firmwareText = null;
+  updateRelease();
+});
+deviceSelect.addEventListener("change", () => {
+  if (firmwareSource === "manual" && firmwareText) updateRelease();
+  else { firmwareKey = ""; updateRelease(); }
+});
+$("manualHex").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  flashButton.disabled = true;
+  try {
+    if (!file.name.toLowerCase().endsWith(".hex")) throw new Error("Выбери файл с расширением .hex.");
+    if (file.size <= 0 || file.size > 16 * 1024 * 1024) throw new Error("Размер HEX-файла должен быть от 1 байта до 16 МБ.");
+    const text = await file.text();
+    const lines = text.trim().split(/\\r?\\n/).filter(Boolean);
+    if (!lines.length || lines.some((line) => !line.startsWith(":")) || !lines.some((line) => line.startsWith(":00000001FF"))) {
+      throw new Error("Файл не похож на корректный Intel HEX: проверь формат и EOF-запись.");
+    }
+    firmwareText = text;
+    firmwareSource = "manual";
+    manualFileName = file.name;
+    firmwareKey = "";
+    $("assetName").textContent = "Выбран локальный HEX: " + file.name;
+    $("manualInfo").textContent = "Файл загружен (" + file.size.toLocaleString("ru-RU") + " байт). Перед прошивкой проверь выбранное устройство.";
+    $("releaseLink").removeAttribute("href");
+    say("Локальный файл загружен: " + file.name + ". Выбери правильный тип устройства и подключай плату.");
+    flashButton.disabled = !esptoolApi;
+  } catch (error) {
+    firmwareText = null;
+    firmwareSource = "manual";
+    manualFileName = "";
+    $("assetName").textContent = "Не удалось принять HEX-файл.";
+    $("manualInfo").textContent = error.message;
+    say("Ошибка выбора файла: " + error.message);
+  }
+});
 flashButton.addEventListener("click", async () => {
   const release = selectedRelease(), device = devices[deviceSelect.value];
-  if (!firmwareText || !release) return;
+  if (!firmwareText) return;
+  const firmwareLabel = firmwareSource === "manual" ? manualFileName : ((release?.label || release?.tag || "релиз") + " · " + device.asset);
   let port, transport;
   flashButton.disabled = true;
   progress.value = 0;
@@ -141,7 +196,7 @@ flashButton.addEventListener("click", async () => {
     }
     const segments = parseIntelHex(firmwareText);
     if (!segments.length) throw new Error("В HEX-файле нет областей для записи.");
-    say("Прошиваю " + release.label + " · " + device.asset);
+    say("Прошиваю " + firmwareLabel);
     await loader.writeFlash({
       fileArray: segments,
       flashMode: "dio",
@@ -159,7 +214,7 @@ flashButton.addEventListener("click", async () => {
     say("Ошибка прошивки: " + (error?.message || error));
   } finally {
     if (transport) { try { await transport.disconnect(); } catch {} }
-    flashButton.disabled = !firmwareText || !selectedRelease() || !esptoolApi;
+    flashButton.disabled = !firmwareText || !esptoolApi;
   }
 });
 loadCatalog();
