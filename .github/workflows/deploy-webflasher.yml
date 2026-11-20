@@ -26,6 +26,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download release firmware for same-origin hosting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p webflasher/firmware
+          while IFS=$'\t' read -r tag key asset; do
+            [ -n "$asset" ] || continue
+            filename="${asset##*/}"
+            mkdir -p "webflasher/firmware/$tag"
+            if [[ "$asset" == https://* ]]; then
+              url="$asset"
+            else
+              url="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$filename"
+            fi
+            echo "Downloading $tag / $key"
+            curl --fail --location --retry 3 --retry-delay 2 "$url" -o "webflasher/firmware/$tag/$filename"
+            test -s "webflasher/firmware/$tag/$filename"
+          done < <(jq -r '.releases[] as $r | $r.assets | to_entries[] | [$r.tag, .key, .value] | @tsv' webflasher/releases.json)
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
