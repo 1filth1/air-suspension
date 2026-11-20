@@ -149,7 +149,7 @@ $("manualHex").addEventListener("change", async (event) => {
     if (!file.name.toLowerCase().endsWith(".hex")) throw new Error("Выбери файл с расширением .hex.");
     if (file.size <= 0 || file.size > 16 * 1024 * 1024) throw new Error("Размер HEX-файла должен быть от 1 байта до 16 МБ.");
     const text = await file.text();
-    const lines = text.trim().split(/\\r?\\n/).filter(Boolean);
+    const lines = text.trim().split(/\r?\n/).filter(Boolean);
     if (!lines.length || lines.some((line) => !line.startsWith(":")) || !lines.some((line) => line.startsWith(":00000001FF"))) {
       throw new Error("Файл не похож на корректный Intel HEX: проверь формат и EOF-запись.");
     }
