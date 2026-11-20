@@ -42,7 +42,11 @@ jobs:
               url="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$filename"
             fi
             echo "Downloading $tag / $key"
-            curl --fail --location --retry 3 --retry-delay 2 "$url" -o "webflasher/firmware/$tag/$filename"
+            if ! curl --fail --location --retry 3 --retry-delay 2 "$url" -o "webflasher/firmware/$tag/$filename"; then
+              echo "::warning::Skipping unavailable legacy asset: $tag / $key ($filename)"
+              rm -f "webflasher/firmware/$tag/$filename"
+              continue
+            fi
             test -s "webflasher/firmware/$tag/$filename"
           done < <(jq -r '.releases[] as $r | $r.assets | to_entries[] | [$r.tag, .key, .value] | @tsv' webflasher/releases.json)
       - uses: actions/configure-pages@v5
