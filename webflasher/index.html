@@ -105,7 +105,7 @@ async function loadFirmware(release, deviceId) {
 }
 async function loadCatalog() {
   try {
-    const response = await fetch(new URL("releases.json", new URL("/air-suspension/", window.location.origin)), { cache: "no-store" });
+    const response = await fetch("./releases.json", { cache: "no-store" });
     if (!response.ok) throw new Error("Каталог не найден");
     releases = (await response.json()).releases || [];
     releaseSelect.replaceChildren(...releases.map((item) => new Option(item.label || item.tag, item.tag)));
