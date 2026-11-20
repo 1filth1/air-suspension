@@ -80,13 +80,10 @@ async function loadFirmware(release, deviceId) {
   const device = devices[deviceId];
   const asset = release.assets?.[deviceId] || device.asset;
   const assetLabel = asset.split("/").pop();
-  const isAbsoluteUrl = asset.startsWith("https://") || asset.startsWith("http://");
-  const url = isAbsoluteUrl
-    ? new URL(asset)
-    : new URL(
-        "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(asset),
-        document.baseURI
-      );
+  const url = new URL(
+    "./firmware/" + encodeURIComponent(release.tag) + "/" + encodeURIComponent(assetLabel),
+    document.baseURI
+  );
   $("assetName").textContent = "Скачиваю " + assetLabel + "…";
   flashButton.disabled = true;
   try {
