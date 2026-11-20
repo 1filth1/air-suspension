@@ -297,6 +297,7 @@ static volatile bool settingsPending = false;
 static bool controllerSettingsLoaded = false;
 static char presetNames[3][13] = {"PARK", "DRIVE", "LIFT"};
 static uint16_t presetTargets[3][4] = {{20,20,20,20},{55,55,55,55},{80,80,80,80}};
+static uint16_t targetToleranceDbar = 2;
 static uint32_t settingsGeneration = 0;
 static uint32_t lastSettingsRequestMs = 0;
 static uint32_t lastTelemetryMs = 0;
@@ -478,6 +479,11 @@ static bool waitForRelease = true;
 static uint32_t sentAt = 0;
 static bool manualMode = false;
 static uint8_t selectedPreset = 0;
+static bool presetPopupOpen = false;
+static bool presetPopupNeedsRestore = false;
+static uint32_t presetPopupOpenedAt = 0;
+static bool presetTracking = false;
+static uint8_t trackingPreset = 0;
 static uint32_t selectPressedAt = 0;
 static uint32_t lastButtonActivityAt = 0;
 static const uint32_t MANUAL_HOLD_MS = 2000;
@@ -524,10 +530,14 @@ static void handleButtons(uint32_t now) {
   if (buttonRaw[0] || buttonRaw[1] || buttonStable[0] || buttonStable[1])
     lastButtonActivityAt = now;
 
-  // Holding SELECT enters manual mode; a short click selects the next preset.
+  // Holding SELECT enters manual mode; a short click opens the preset popup
+  // and advances to the next preset.
   if (!manualMode && selectPressed && buttonRaw[0] &&
       now - selectPressedAt >= MANUAL_HOLD_MS) {
     manualMode = true;
+    presetPopupOpen = false;
+    presetPopupNeedsRestore = true;
+    presetTracking = false;
     selection = 0; // Start with front-left fill.
     lastButtonActivityAt = now;
     waitForRelease = true; // CONFIRM must be released after entry.
@@ -540,12 +550,24 @@ static void handleButtons(uint32_t now) {
              now - selectPressedAt < MANUAL_HOLD_MS &&
              linked && controllerSettingsLoaded) {
     selectedPreset = (selectedPreset + 1) % 3;
+    presetPopupOpen = true;
+    presetPopupOpenedAt = now;
   }
 
-  // Outside manual mode, a short CONFIRM click applies the highlighted preset.
-  if (!manualMode && confirmReleasedEdge &&
+  // CONFIRM applies only while the popup is visible. The wheel borders then
+  // track each corner against the selected preset target.
+  if (!manualMode && presetPopupOpen && confirmReleasedEdge &&
       linked && controllerSettingsLoaded) {
     sendPreset(selectedPreset);
+    trackingPreset = selectedPreset;
+    presetTracking = true;
+    presetPopupOpen = false;
+    presetPopupNeedsRestore = true;
+  }
+
+  if (presetPopupOpen && now - presetPopupOpenedAt >= 5000U) {
+    presetPopupOpen = false;
+    presetPopupNeedsRestore = true;
   }
 
   if (manualMode && now - lastButtonActivityAt >= MANUAL_IDLE_MS) {
@@ -673,38 +695,46 @@ static void applyControllerSettings() {
   }
   memcpy(presetNames, frame.presetNames, sizeof(presetNames));
   memcpy(presetTargets, frame.presetDbar, sizeof(presetTargets));
+  targetToleranceDbar = frame.targetToleranceDbar ? frame.targetToleranceDbar : 2;
   settingsGeneration = frame.generation;
   controllerSettingsLoaded = true;
 }
 
 static void drawPresetFooter(bool force) {
-  static int8_t shownPreset = -1;
   static bool shownManual = false;
-  static bool shownLoaded = false;
-  const bool changed = force || shownManual != manualMode ||
-                       shownLoaded != controllerSettingsLoaded ||
-                       shownPreset != (int8_t)selectedPreset;
-  static char shownText[32] = "";
-  char text[32] = "";
-  if (manualMode) {
-    snprintf(text, sizeof(text), "MANUAL");
-  } else if (!controllerSettingsLoaded) {
-    snprintf(text, sizeof(text), "%s", linked ? "SYNC SETTINGS..." : "NO CONTROLLER");
-  } else {
-    const uint8_t p = selectedPreset;
-    snprintf(text, sizeof(text), ">%.6s %.1f/%.1f/%.1f/%.1f",
-      presetNames[p],
-      presetTargets[p][0] / 10.0f, presetTargets[p][1] / 10.0f,
-      presetTargets[p][2] / 10.0f, presetTargets[p][3] / 10.0f);
-  }
-  if (changed || strcmp(text, shownText) != 0) {
+  if (force || shownManual != manualMode) {
     gfx.fillRect(0, 218, 135, 22, BG);
-    drawText(2, 222, text, controllerSettingsLoaded ? MINT : ORANGE, BG, 1);
-    snprintf(shownText, sizeof(shownText), "%s", text);
+    if (manualMode) drawText(31, 222, "MANUAL", MINT, BG, 2);
   }
-  shownPreset = (int8_t)selectedPreset;
   shownManual = manualMode;
-  shownLoaded = controllerSettingsLoaded;
+}
+
+static void drawPresetPopup(bool force) {
+  static bool shownOpen = false;
+  static int8_t shownPreset = -1;
+  if (!presetPopupOpen) {
+    shownOpen = false;
+    return;
+  }
+  if (!force && shownOpen && shownPreset == (int8_t)selectedPreset) return;
+
+  const int16_t x = 6, y = 99, w = 123, h = 49;
+  gfx.fillRoundRect(x, y, w, h, 7, BG);
+  gfx.drawRoundRect(x, y, w, h, 7, ORANGE);
+  gfx.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 6, ORANGE);
+  drawText(12, 104, "SELECT PRESET", ORANGE, BG, 1);
+  char name[10];
+  snprintf(name, sizeof(name), "%.9s", presetNames[selectedPreset]);
+  drawText(12, 116, name, ORANGE, BG, 2);
+  char targets[28];
+  snprintf(targets, sizeof(targets), "%.1f/%.1f/%.1f/%.1f",
+           presetTargets[selectedPreset][0] / 10.0f,
+           presetTargets[selectedPreset][1] / 10.0f,
+           presetTargets[selectedPreset][2] / 10.0f,
+           presetTargets[selectedPreset][3] / 10.0f);
+  drawText(9, 137, targets, ORANGE, BG, 1);
+  shownOpen = true;
+  shownPreset = (int8_t)selectedPreset;
 }
 
 static void drawStatusWord(bool force) {
@@ -807,26 +837,47 @@ static void drawStaticFrame() {
 }
 
 static void drawSelection(bool force) {
-  static int8_t shown = -2;
-  static bool shownOn = false;
-  bool on = activeSelection < 0 || ((millis() / 250) % 2 == 0);
-  if (!force && shown == selection && shownOn == on) return;
+  static uint32_t lastDrawAt = 0;
+  const uint32_t now = millis();
+  if (!force && now - lastDrawAt < 200U) return;
+  lastDrawAt = now;
+  const bool blinkOn = ((now / 250U) % 2U) == 0;
+  const float tolerance = (targetToleranceDbar ? targetToleranceDbar : 2) / 10.0f;
+
   for (uint8_t wheel = 0; wheel < 4; ++wheel) {
     uint16_t color = SURFACE;
-    if (selection >= 0 && wheel == selection / 2 && on)
-      color = (selection & 1) ? RED : 0x001F;
+    if (manualMode && selection >= 0 && wheel == selection / 2) {
+      color = (activeSelection < 0 || blinkOn)
+                  ? ((selection & 1) ? RED : 0x001F)
+                  : SURFACE;
+    } else if (presetTracking && telemetryFresh()) {
+      const float current = wheelBar(wheel);
+      const float target = presetTargets[trackingPreset][wheel] / 10.0f;
+      if (barValid(current)) {
+        const float difference = target - current;
+        if (fabsf(difference) <= tolerance) {
+          color = GREEN;
+        } else if (difference > tolerance) {
+          color = blinkOn ? 0x001F : SURFACE; // inflating
+        } else {
+          color = blinkOn ? RED : SURFACE; // deflating
+        }
+      } else {
+        color = ORANGE;
+      }
+    }
     for (int16_t inset = 0; inset < 2; ++inset)
       gfx.drawRoundRect(layout::WHEEL_X[wheel & 1] + inset,
                         layout::WHEEL_Y[wheel >> 1] + inset,
                         layout::WHEEL_W - inset * 2,
                         layout::WHEEL_H - inset * 2, 8 - inset, color);
   }
-  shown = selection;
-  shownOn = on;
 }
 
 static void render(bool full) {
-  if (full) {
+  if (full || presetPopupNeedsRestore) {
+    presetPopupNeedsRestore = false;
+    full = true;
     shownTank[0] = '\0';
     for (uint8_t i = 0; i < 4; i++) shownWheel[i][0] = '\0';
     shownStatus[0] = '\0';
@@ -844,6 +895,7 @@ static void render(bool full) {
   }
   drawSelection(full);
   drawPresetFooter(full);
+  drawPresetPopup(full);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -908,6 +960,9 @@ void loop() {
       }
       lastControllerPacketMs = 0;
       controllerSettingsLoaded = false;
+      presetPopupOpen = false;
+      presetPopupNeedsRestore = true;
+      presetTracking = false;
       lastSettingsRequestMs = 0;
       lastDiscoveryMs = now;
       sendDiscovery();
