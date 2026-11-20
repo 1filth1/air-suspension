@@ -1,12 +1,13 @@
 name: Deploy web flasher
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - "pages build and deployment"
+    types:
+      - completed
     branches:
       - codex/pre-release-central-settings
-    paths:
-      - "webflasher/**"
-      - ".github/workflows/deploy-webflasher.yml"
   workflow_dispatch:
 
 permissions:
@@ -20,12 +21,15 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Download release firmware for same-origin hosting
         env:
           GH_TOKEN: ${{ github.token }}
